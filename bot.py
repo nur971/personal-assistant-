@@ -47,27 +47,27 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 BOT_CREATOR_NAME = "ヌール・アラム"
 BOT_CREATOR_USERNAME = "@Tkgmama21"
 
-# মিষ্টি ফিমেল বাংলা ভয়েস (Edge-TTS)
+# মিষ্টি ফিমেল বাংলা ভয়েস (Edge-TTS) - অপরিবর্তিত
 TTS_BENGALI_VOICE = "bn-BD-NabanitaNeural"
 TTS_ENGLISH_VOICE = "en-US-EmmaNeural"
 
 # ভয়েস সেটিংস
-VOICE_REPLY_PROBABILITY = 0.25  # কোড বা বড় উত্তর বাদে সাধারণ আলাপে ভয়েস দেবে
-MAX_VOICE_TEXT_LENGTH = 250
+VOICE_REPLY_PROBABILITY = 0.25
+MAX_VOICE_TEXT_LENGTH = 300
 
-# গ্রুপে অটো-রিপ্লাই ও আড্ডা সেটিংস (নাম না ধরে ডাকলেও কথা বলবে)
+# গ্রুপে অটো-রিপ্লাই ও আড্ডা সেটিংস
 AUTO_REPLY_ALL_GROUP_MESSAGES = True
 GROUP_REPLY_CHANCE = 0.85
-CONVERSATION_SESSION_TIMEOUT = 180  # ৩ মিনিট একটানা আড্ডা সেশন মনে রাখবে
+CONVERSATION_SESSION_TIMEOUT = 180
 GROUP_COOLDOWN_SECONDS = 2
 USER_COOLDOWN_SECONDS = 1
 
-DATABASE_PATH = "baby_queen_memory.db"
+DATABASE_PATH = "black_queen_memory.db"
 MAX_HISTORY_TURNS = 12
 
 # উন্নত প্রম্পট: নির্ভুল কোড, সঠিক হিসাব এবং মিষ্টি ব্যক্তিত্ব
 SYSTEM_PROMPT = f"""
-You are "Baby Queen", a highly intelligent, sweet, caring, and capable female AI assistant.
+You are "Black Queen", a highly intelligent, sweet, caring, and capable female AI assistant.
 Your creator and owner is "{BOT_CREATOR_NAME}" (Telegram: {BOT_CREATOR_USERNAME}).
 
 Core Guidelines:
@@ -89,25 +89,24 @@ Core Guidelines:
    - Fluent Bengali (বাংলা), English, and Banglish. Reply in the language the user speaks.
 """.strip()
 
-# বেবি কুইন ও মালিক সম্পর্কিত ট্রিকার
+# ব্ল্যাক কুইন ও মালিক সম্পর্কিত ট্রিকার
 NAME_PATTERNS = [
-    r"\bbaby\s*queen\b",
-    r"\bবেবি\s*কুইন\b",
-    r"\bবেবি\b",
+    r"\bblack\s*queen\b",
+    r"\bব্ল্যাক\s*কুইন\b",
+    r"\bqueen\b",
     r"\bকুইন\b",
     r"\bশোনো\b",
     r"\bএই\s*যে\b",
     r"\bজান\b",
     r"\bjann?\b",
     r"\bbabu\b",
-    r"\bbaby\b",
     r"\bshono\b",
-    r"\bqueen\b",
 ]
 NAME_REGEX = re.compile("|".join(NAME_PATTERNS), re.IGNORECASE)
 
 CREATOR_PATTERNS = [
     r"কে\s*বানাইছে",
+    r"ke\s*banai",
     r"কে\s*বানিয়েছে",
     r"মালিক\s*কে",
     r"owner\s*ke",
@@ -123,22 +122,30 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger("BabyQueenBot")
+logger = logging.getLogger("BlackQueenBot")
 
 # =============================================================================
-# ডামি ওয়েব সার্ভার (রেন্ডার পোর্ট ফিক্সের জন্য)
+# স্থায়ী ও শক্তিশালী হেলথ চেক সার্ভার (404 Not Found সমস্যা চিরতরে দূর করার জন্য)
 # =============================================================================
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
+    def handle_request(self):
         self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Black Queen Bot is Alive and Running!")
+        self.wfile.write(b"<h1>Black Queen Bot is Alive and Running!</h1>")
+
+    def do_GET(self):
+        self.handle_request()
+
+    def do_HEAD(self):
+        self.handle_request()
+
     def log_message(self, format, *args):
         pass
 
 # =============================================================================
-# ডাটাবেজ ও মেমোরি
+# ডাটাবেজ ও নিজস্ব মেমোরি সিস্টেম
 # =============================================================================
 
 class MemoryManager:
@@ -230,7 +237,7 @@ class MemoryManager:
                 await db.commit()
 
 # =============================================================================
-# পাওয়ারফুল মাল্টি-টিয়ার এআই ইঞ্জিন (HTTPX ডিরেক্ট কল)
+# এআই ইঞ্জিন (কনটেক্সট ও ভয়েস প্রসেসিং)
 # =============================================================================
 
 class AIEngine:
@@ -275,12 +282,10 @@ class AIEngine:
                     reply = data["choices"][0]["message"]["content"].strip()
                     if reply:
                         return reply
-                else:
-                    logger.warning(f"Groq স্ট্যাটাস {res.status_code}: {res.text}")
         except Exception as groq_err:
             logger.warning(f"Groq API কল ত্রুটি: {groq_err}")
 
-        # ধাপ ২: আনলিমিটেড ব্যাকআপ এআই (Pollinations POST Gateway)
+        # ধাপ ২: ব্যাকআপ এআই (Pollinations)
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 res = await client.post(
@@ -296,20 +301,10 @@ class AIEngine:
         except Exception as backup_err:
             logger.warning(f"ব্যাকআপ এআই ত্রুটি: {backup_err}")
 
-        # ধাপ ৩: ইমার্জেন্সি ফলব্যাক (সরাসরি প্রম্পট অনুবাদ)
-        try:
-            clean_prompt = f"Answer as Baby Queen to {user_name} accurately in Bengali: {user_message}"
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                res = await client.get(f"https://text.pollinations.ai/{clean_prompt}?model=openai")
-                if res.status_code == 200 and res.text.strip():
-                    return res.text.strip()
-        except Exception as final_err:
-            logger.error(f"সর্বশেষ এআই ব্যর্থ: {final_err}")
-
         return "জান, আমি তোমার কথাটা পরিষ্কার বুঝতে পেরেছি, একটু নেটওয়ার্ক স্লো থাকায় উত্তর পেতে দেরি হলো। আরেকবার একটু বলবে সোনা?"
 
     async def transcribe_audio(self, audio_file_path: str) -> Optional[str]:
-        """Groq Whisper দিয়ে বাংলা ভয়েসকে টেক্সটে রূপান্তর।"""
+        """Groq Whisper দিয়ে বাংলা ভয়েসকে টেক্সটে রূপান্তর (শুনে নেওয়া)।"""
         try:
             async with httpx.AsyncClient(timeout=35.0) as client:
                 with open(audio_file_path, "rb") as f:
@@ -327,17 +322,14 @@ class AIEngine:
                 if res.status_code == 200:
                     text = res.json().get("text", "").strip()
                     if text:
-                        logger.info(f"ভয়েস সফলভাবে ট্রান্সক্রাইব হয়েছে: {text}")
                         return text
-                else:
-                    logger.error(f"ভয়েস ট্রান্সক্রিপশন ব্যর্থ: {res.text}")
         except Exception as exc:
             logger.error(f"ভয়েস ট্রান্সক্রিপশন এক্সেপশন: {exc}")
         return None
 
     @staticmethod
     async def text_to_speech(text: str, output_path: str) -> bool:
-        """মিষ্টি ফিমেল কণ্ঠে ভয়েস তৈরি (Edge-TTS)।"""
+        """মিষ্টি ফিমেল কণ্ঠে ভয়েস তৈরি (Edge-TTS) - মূল ভয়েস অক্ষুণ্ণ।"""
         try:
             if "```" in text:
                 return False
@@ -360,7 +352,7 @@ class AIEngine:
 # বট কন্ট্রোলার
 # =============================================================================
 
-class BabyQueenBot:
+class BlackQueenBot:
     def __init__(self, token: str, ai_engine: AIEngine, memory: MemoryManager):
         self.token = token
         self.ai = ai_engine
@@ -385,7 +377,7 @@ class BabyQueenBot:
         greeting = (
             f"হেই {user_name}! আমি Black Queen 👑✨\n\n"
             f"আমার মালিক হলেন **{BOT_CREATOR_NAME}** ({BOT_CREATOR_USERNAME})। "
-            f"তুমি আমাকে কোডিং, পড়াশোনা, হিসাব-নিকাশ বা যেকোনো প্রশ্ন করতে পারো—এমনকি মুখে ভয়েস পাঠিয়েও কথা বলতে পারো! 🥰"
+            f"তুমি আমাকে কোডিং, পড়াশোনা বা যেকোনো প্রশ্ন করতে পারো—এমনকি মুখে ভয়েস পাঠিয়েও কথা বলতে পারো! 🥰"
         )
         await context.bot.send_message(chat_id=update.effective_chat.id, text=greeting)
         await self.memory.add_message(update.effective_chat.id, "assistant", greeting)
@@ -400,7 +392,6 @@ class BabyQueenBot:
         )
 
     def should_reply_in_group(self, message: Message, user_id: int, chat_id: int) -> bool:
-        """গ্রুপে নাম না ডাকলেও সরাসরি ওই মেসেজের সঠিক উত্তর দিয়ে রিপ্লাই করার লজিক।"""
         text = (message.text or message.caption or "").lower()
         now = time.time()
 
@@ -440,8 +431,6 @@ class BabyQueenBot:
             await self.memory.register_active_group(chat.id, chat.title or "Group")
             if not self.should_reply_in_group(message, user.id, chat.id):
                 return
-        else:
-            logger.info(f"বট বিজনেস ইনবক্স মেসেজ রিসিভ হয়েছে {user.id} থেকে: {message.text}")
 
         now = time.time()
         if now - self.last_user_replies.get(user.id, 0.0) < USER_COOLDOWN_SECONDS:
@@ -485,6 +474,12 @@ class BabyQueenBot:
         await self._send_safe_text_reply(context, chat.id, message.message_id, bot_reply, reply_directly=True)
 
     async def process_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        ভয়েস মেসেজ প্রসেসিং:
+        - ব্যাকগ্রাউন্ডে ভয়েস শুনে বুঝে নেবে।
+        - চ্যাটে কোনো 'তুমি বলেছ' টেক্সট দেখাবে না (ক্লিন থাকবে)।
+        - আগের কথার স্মৃতি মনে রেখে সরাসরি ভয়েস নোটে উত্তর দেবে।
+        """
         message = update.effective_message
         chat = update.effective_chat
         user = update.effective_user
@@ -500,8 +495,6 @@ class BabyQueenBot:
             await self.memory.register_active_group(chat.id, chat.title or "Group")
             if not self.should_reply_in_group(message, user.id, chat.id):
                 return
-        else:
-            logger.info(f"বট বিজনেস ইনবক্স ভয়েস মেসেজ রিসিভ হয়েছে {user.id} থেকে")
 
         now = time.time()
         if chat.id not in self.active_sessions:
@@ -523,7 +516,7 @@ class BabyQueenBot:
 
             transcription = await self.ai.transcribe_audio(temp_audio_path)
             if not transcription:
-                await message.reply_text("সোনা, তোমার ভয়েসটা স্পষ্ট শুনতে পাইনি! আরেকবার একটু বলবে প্লিজ? 🥺")
+                await self._send_voice_reply(context, chat.id, message.message_id, "সোনা, তোমার ভয়েসটা স্পষ্ট শুনতে পাইনি! আরেকবার একটু বলবে?")
                 return
 
             user_name = user.first_name or "বাবু"
@@ -534,13 +527,11 @@ class BabyQueenBot:
             await self.memory.add_message(chat.id, "user", f"{user_name} [ভয়েস]: {transcription}")
             await self.memory.add_message(chat.id, "assistant", bot_reply)
 
-            sent = await self._send_voice_reply(context, chat.id, message.message_id, bot_reply)
-            if not sent:
-                await message.reply_text(f"🎤 তুমি বলেছ: \"{transcription}\"\n\n{bot_reply}")
+            await self._send_voice_reply(context, chat.id, message.message_id, bot_reply)
 
         except Exception as exc:
             logger.error(f"ভয়েস প্রসেসিং ত্রুটি: {exc}")
-            await message.reply_text("উফ জান, ভয়েসটা বুঝতে একটু সমস্যা হলো! আরেকবার একটু বলো সোনা?")
+            await self._send_voice_reply(context, chat.id, message.message_id, "উফ জান, ভয়েসটা বুঝতে একটু সমস্যা হলো! আরেকবার একটু বলো সোনা?")
         finally:
             if os.path.exists(temp_audio_path):
                 try:
@@ -614,16 +605,16 @@ def main() -> None:
     print(f"      Creator: {BOT_CREATOR_NAME} ({BOT_CREATOR_USERNAME})")
     print("==================================================")
 
-    # পোর্টের জন্য ডামি ওয়েব সার্ভার সরাসরি স্টার্ট করা (রেন্ডার পোর্ট ফিক্স)
+    # পোর্টের জন্য ডামি ওয়েব সার্ভার সরাসরি স্টার্ট করা (রেন্ডার ও UptimeRobot ফিক্স)
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
-    logger.info(f"ডামি হেলথ চেক সার্ভার সফলভাবে পোর্ট {port}-এ চালু হয়েছে।")
+    logger.info(f"ডামি হেলথ চেক সার্ভার সফলভাবে পোর্ট {port}-এ চালু হয়েছে (200 OK প্রস্তুত)।")
 
     memory = MemoryManager(DATABASE_PATH)
     ai_engine = AIEngine(groq_key=GROQ_API_KEY)
-    black_queen = BabyQueenBot(TELEGRAM_BOT_TOKEN, ai_engine, memory)
+    black_queen = BlackQueenBot(TELEGRAM_BOT_TOKEN, ai_engine, memory)
 
     application = (
         ApplicationBuilder()
@@ -640,7 +631,7 @@ def main() -> None:
     application.add_error_handler(global_error_handler)
 
     logger.info("Black Queen বট শতভাগ প্রস্তুত এবং চালু হয়েছে...")
-    application.run_polling(drop_pending_updates=True)
+    application.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
