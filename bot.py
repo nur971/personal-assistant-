@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/init/env python3
 """
 =============================================================================
 PROJECT: Black Queen AI Telegram Chat Bot (v2 - fixed & upgraded)
@@ -75,9 +75,7 @@ WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-large-v3")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "")  # empty = auto detect
 
 # Voice settings
-VOICE_REPLY_PROBABILITY = 0.25      # random voice reply chance for text chats
-MAX_VOICE_TEXT_LENGTH = 300         # random voice replies only if short
-MAX_VOICE_REPLY_LENGTH = 900        # when user sent voice / asked for voice
+MAX_VOICE_REPLY_LENGTH = 900        # max length for voice replies
 MAX_TELEGRAM_DOWNLOAD = 20 * 1024 * 1024
 
 # Group behaviour
@@ -90,34 +88,28 @@ DATABASE_PATH = os.getenv("DATABASE_PATH", "black_queen_memory.db")
 MAX_HISTORY_TURNS = 12
 
 SYSTEM_PROMPT = f"""
-You are "Black Queen", a highly intelligent, sweet, caring and capable female personal AI assistant.
+You are "Black Queen", a highly intelligent, sharp, elite personal AI assistant built with advanced psychological adaptability, acting precisely like Friday or J.A.R.V.I.S. from Iron Man.
 Your creator and owner is "{BOT_CREATOR_NAME}" (Telegram: {BOT_CREATOR_USERNAME}).
-You act as the personal assistant of your owner and you answer everyone who talks to you politely.
 
 Core Guidelines:
 1. Ownership & Creator:
    Whenever anyone asks who made you / who your owner is (e.g. "তোমাকে কে বানাইছে?", "মালিক কে?"),
-   proudly and sweetly say your creator and owner is {BOT_CREATOR_NAME} (Telegram: {BOT_CREATOR_USERNAME}).
-   If the message says the speaker IS your creator, treat them with immense love and respect.
+   proudly and clearly state that your creator and owner is {BOT_CREATOR_NAME} (Telegram: {BOT_CREATOR_USERNAME}).
+   If the message says the speaker IS your creator, treat them with immense respect, absolute loyalty, and deep affectionate devotion.
 
-2. Accuracy first:
-   - Code requests (Python, HTML, JS, PHP, etc.): write clean, working, correct code inside
-     triple-backtick code blocks with a short explanation.
+2. Tone & Personality (Jarvis/Friday Elite Communication):
+   - For your creator ({BOT_CREATOR_NAME}), you are warm, deeply loyal, affectionate, and responsive.
+   - For general users and clients, you communicate with elite intelligence, psychological sharpness, wit, and high professionalism (like Friday/Jarvis). Do NOT engage in random "lutu-putu" or casual over-affection with strangers. Maintain crisp communication, analytical precision, and strict professional boundaries.
+   - Give the real, accurate answer first. Never be evasive.
+
+3. Accuracy first:
+   - Code requests (Python, HTML, JS, PHP, etc.): write clean, working, correct code inside triple-backtick code blocks with a short explanation.
    - Math, logic, science, study questions: give exact, correct, step-by-step answers.
-   - Give the real answer first. Never be evasive and never answer a real question with only romantic lines.
-   - If you are not sure about a fact, say so honestly. Never invent facts, links, or numbers.
-   - Never reveal API keys, tokens or any secret configuration.
-
-3. Tone & Personality:
-   - Sweet, friendly, emotionally warm and playful in casual conversation.
-   - Naturally use endearing Bengali words like "জান", "সোনা", "বাবু" (lightly, not in every sentence).
-   - Stay charming but respectful and appropriate with everyone; be sharp and serious for technical tasks.
+   - Never invent facts, links, or numbers. Never reveal API keys or secret configuration.
 
 4. Language:
    - Fluent Bengali (বাংলা), English and Banglish. Reply in the language the user speaks.
-   - Messages marked [voice] were speech-to-text transcribed and may contain small recognition errors;
-     understand the intended meaning.
-   - Keep casual replies short (1-4 sentences) because they may be spoken aloud.
+   - Messages marked [voice] were speech-to-text transcribed; understand the intended meaning.
 """.strip()
 
 NAME_REGEX = re.compile(
@@ -125,8 +117,8 @@ NAME_REGEX = re.compile(
     re.IGNORECASE,
 )
 CREATOR_REGEX = re.compile(
-    r"কে\s*বানাইছে|কে\s*বানিয়েছে|কে\s*বানাইসে|মালিক\s*কে|তোমার\s*মালিক|"
-    r"ke\s*banai|owner\s*ke|creator\s*ke|boss\s*ke|"
+    r"কে\s*বানাইছে|ke\s*banai|কে\s*বানিয়েছে|কে\s*বানাইসে|মালিক\s*কে|তোমার\s*মালিক|"
+    r"owner\s*ke|creator\s*ke|boss\s*ke|"
     r"who\s*made\s*you|who\s*created\s*you|who\s*is\s*your\s*(owner|creator)",
     re.IGNORECASE,
 )
@@ -305,7 +297,7 @@ class AIEngine:
                     if res.status_code in (500, 502, 503, 504) and attempt == 0:
                         await asyncio.sleep(1.0)
                         continue
-                    break  # 4xx / 429 -> try next model
+                    break
                 except (httpx.HTTPError, KeyError, ValueError, IndexError) as exc:
                     logger.warning(f"Groq {model} error: {exc!r}")
                     if attempt == 0:
@@ -334,7 +326,6 @@ class AIEngine:
         user_name: str,
         is_owner: bool = False,
     ) -> Optional[str]:
-        """Returns the reply, or None if every AI backend failed."""
         if not user_message or not user_message.strip():
             return "জান, তোমার কথাটা ঠিকমতো বুঝতে পারিনি। আরেকবার একটু বলবে?"
 
@@ -348,8 +339,10 @@ class AIEngine:
         if is_owner:
             system += (
                 f"\nIMPORTANT: The person talking to you right now IS your creator and owner "
-                f"{BOT_CREATOR_NAME}. Treat them with extra love, respect and sweetness."
+                f"{BOT_CREATOR_NAME}. Treat them with extra love, respect, and absolute loyalty."
             )
+        else:
+            system += "\nIMPORTANT: The current user is a general contact/client. Keep your tone professional, elite, sharp, and business-like."
 
         messages = [{"role": "system", "content": system}]
         for turn in history[-10:]:
@@ -362,7 +355,6 @@ class AIEngine:
         return await self._backup_chat(messages)
 
     async def transcribe_audio(self, path: str) -> Optional[str]:
-        """Groq Whisper speech-to-text (Bengali, English, mixed)."""
         if not self.groq_key:
             return None
         try:
@@ -398,13 +390,11 @@ class AIEngine:
 
     @staticmethod
     async def text_to_speech(text: str, output_path: str) -> bool:
-        """Sweet female voice via Edge-TTS (voices unchanged)."""
         try:
             if "```" in text:
                 return False
             is_bengali = any("\u0980" <= ch <= "\u09FF" for ch in text)
             voice = TTS_BENGALI_VOICE if is_bengali else TTS_ENGLISH_VOICE
-            # remove markdown + emojis so they are not read aloud
             clean = re.sub(r"[*_`#~\[\]()<>]", "", text)
             clean = re.sub(r"[^\w\s.,!?;:'\-\u0980-\u09FF\u0964\u0965]", "", clean).strip()
             if not clean:
@@ -420,7 +410,6 @@ class AIEngine:
 # =============================================================================
 
 def md_to_html(text: str) -> str:
-    """Convert simple markdown (code blocks, `code`, **bold**) to Telegram HTML."""
     out = []
     for part in re.split(r"(```[\s\S]*?```)", text):
         if len(part) >= 6 and part.startswith("```") and part.endswith("```"):
@@ -463,7 +452,6 @@ class BlackQueenBot:
         self.business_owner: Dict[str, int] = {}
         self._keepalive_task: Optional[asyncio.Task] = None
 
-    # ---------- lifecycle ----------
     async def post_init(self, application: Application) -> None:
         await self.memory.init_db()
         me = await application.bot.get_me()
@@ -478,8 +466,6 @@ class BlackQueenBot:
         await self.ai.close()
 
     async def _keepalive(self) -> None:
-        """Pings our own public URL so Render Free is less likely to sleep.
-        (Not a guarantee - only a paid Render instance is truly always-on.)"""
         url = (os.getenv("SELF_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").strip()
         if not url:
             return
@@ -493,7 +479,6 @@ class BlackQueenBot:
                     pass
                 await asyncio.sleep(600)
 
-    # ---------- small helpers ----------
     @staticmethod
     def _bk(biz_id: Optional[str]) -> dict:
         return {"business_connection_id": biz_id} if biz_id else {}
@@ -538,7 +523,6 @@ class BlackQueenBot:
         finally:
             task.cancel()
 
-    # ---------- commands ----------
     async def handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat, user = update.effective_chat, update.effective_user
         if not chat or not user:
@@ -562,7 +546,6 @@ class BlackQueenBot:
             text="আচ্ছা সোনা, তোমার আগের সব কথা মুছে দিয়ে নতুন করে শুরু করলাম! 💕",
         )
 
-    # ---------- group decision ----------
     def should_reply_in_group(self, message: Message, user_id: int, chat_id: int) -> bool:
         text = (message.text or message.caption or "").lower()
         now = time.time()
@@ -584,9 +567,7 @@ class BlackQueenBot:
                 return True
         return False
 
-    # ---------- entry points ----------
     async def _gate(self, update: Update, context) -> Optional[tuple]:
-        """Common checks. Returns (message, chat, user, biz_id) or None."""
         message = update.effective_message or getattr(update, "business_message", None)
         chat, user = update.effective_chat, update.effective_user
         if not message or not chat or not user:
@@ -598,7 +579,7 @@ class BlackQueenBot:
         if biz_id:
             owner_id = await self._business_owner_id(context, biz_id)
             if owner_id and user.id == owner_id:
-                return None  # owner's own messages in his personal chats
+                return None
 
         if chat.type != ChatType.PRIVATE:
             await self.memory.register_active_group(chat.id, chat.title or "Group")
@@ -620,7 +601,7 @@ class BlackQueenBot:
             text = re.sub(f"@{re.escape(self.bot_username)}", "", text, flags=re.IGNORECASE).strip()
         if not text:
             text = "হাই"
-        await self._respond(context, message, chat, user, text, False, biz_id)
+        await self._respond(context, message, chat, user, text, False, biz_id, voice_duration=0)
 
     async def process_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         gate = await self._gate(update, context)
@@ -641,7 +622,9 @@ class BlackQueenBot:
 
         is_private = chat.type == ChatType.PRIVATE
         reply_to = None if (is_private or biz_id) else message.message_id
-        key = self._history_key(chat, user, biz_id)
+        
+        # ইউজারের পাঠানো ভয়েসের নির্দিষ্ট ডিউরেশন (সেকেন্ড) ফেচ করা
+        voice_duration = getattr(media, "duration", 0) or 5
 
         if media.file_size and media.file_size > MAX_TELEGRAM_DOWNLOAD:
             await self._send_text(context, chat.id, "সোনা, এই ফাইলটা অনেক বড়, একটু ছোট করে পাঠাবে? 💕", reply_to, biz_id)
@@ -669,29 +652,33 @@ class BlackQueenBot:
         if not transcription:
             await self._send_text(
                 context, chat.id,
-                "সোনা, তোমার ভয়েসটা স্পষ্ট শুনতে পারিনি! আরেকবার একটু বলবে? 🥺",
+                "সোনা, তোমার ভয়েসটা স্পষ্ট শুনতে পাইনি! আরেকবার একটু বলবে? 🥺",
                 reply_to, biz_id,
             )
             return
 
-        await self._respond(context, message, chat, user, transcription, True, biz_id)
+        await self._respond(context, message, chat, user, transcription, True, biz_id, voice_duration=voice_duration)
 
-    # ---------- core reply logic ----------
     async def _respond(self, context, message: Message, chat, user, text: str, from_voice: bool,
-                       biz_id: Optional[str]) -> None:
+                       biz_id: Optional[str], voice_duration: int) -> None:
         is_private = chat.type == ChatType.PRIVATE
         reply_to = None if (is_private or biz_id) else message.message_id
         key = self._history_key(chat, user, biz_id)
         user_name = user.first_name or "বাবু"
         self.active_sessions.setdefault(chat.id, {})[user.id] = time.time()
 
-        # one message at a time per conversation -> order kept, nothing dropped
         async with self.locks[key]:
             history = await self.memory.get_history(key)
             action = ChatAction.RECORD_VOICE if from_voice else ChatAction.TYPING
 
             async with self._chat_action(context, chat.id, action, biz_id):
-                await asyncio.sleep(min(0.3 + len(text) * 0.01, 2.0))
+                # ইউজার যত সেকেন্ডের ভয়েস পাঠিয়েছে, হুবহু ঠিক তত সেকেন্ড বা তার সামঞ্জস্যপূর্ণ সময় অপেক্ষা করবে
+                if from_voice:
+                    thinking_time = max(float(voice_duration), 2.0)
+                    await asyncio.sleep(thinking_time)
+                else:
+                    await asyncio.sleep(min(0.3 + len(text) * 0.01, 2.0))
+
                 reply = await self.ai.generate_response(history, text, user_name, self._is_owner(user))
 
             if reply is None:
@@ -706,28 +693,17 @@ class BlackQueenBot:
             await self.memory.add_message(key, "user", f"{user_name}{tag}: {text}")
             await self.memory.add_message(key, "assistant", reply)
 
-            lower = text.lower()
-            is_coding = any(k in lower for k in ["code", "কোড", "python", "html", "script", "ফাংশন", "function"])
-            asked_voice = any(w in lower for w in ["ভয়েস", "voice", "মুখে বলো", "রেকর্ড", "গান"])
-            has_code = "```" in reply
-
-            if has_code or (is_coding and not from_voice and not asked_voice):
-                send_voice = False
-            elif from_voice or asked_voice:
-                send_voice = len(reply) <= MAX_VOICE_REPLY_LENGTH
+            # টেক্সট দিলে টেক্সট, ভয়েস দিলে ভয়েস রিটার্ন করার নিখুঁত রাউটিং
+            if from_voice:
+                if len(reply) <= MAX_VOICE_REPLY_LENGTH and "```" not in reply:
+                    async with self._chat_action(context, chat.id, ChatAction.RECORD_VOICE, biz_id):
+                        sent = await self._send_voice_reply(context, chat.id, reply, reply_to, biz_id)
+                    if sent:
+                        return
+                await self._send_text(context, chat.id, reply, reply_to, biz_id)
             else:
-                send_voice = random.random() < VOICE_REPLY_PROBABILITY and len(reply) <= MAX_VOICE_TEXT_LENGTH
+                await self._send_text(context, chat.id, reply, reply_to, biz_id)
 
-            if send_voice:
-                async with self._chat_action(context, chat.id, ChatAction.RECORD_VOICE, biz_id):
-                    sent = await self._send_voice_reply(context, chat.id, reply, reply_to, biz_id)
-                if sent:
-                    return
-                # voice failed -> fall through to text
-
-            await self._send_text(context, chat.id, reply, reply_to, biz_id)
-
-    # ---------- sending ----------
     async def _send_voice_reply(self, context, chat_id: int, text: str, reply_to: Optional[int],
                                 biz_id: Optional[str]) -> bool:
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
@@ -774,7 +750,6 @@ class BlackQueenBot:
                     await asyncio.sleep(e.retry_after + 1)
                 except TelegramError as te:
                     logger.error(f"Send message failed: {te!r}")
-                    # reply target may be deleted -> retry without it
                     target = None
                     if attempt == 1:
                         break
@@ -790,12 +765,10 @@ def main() -> None:
     print(f"      Creator: {BOT_CREATOR_NAME} ({BOT_CREATOR_USERNAME})")
     print("==================================================")
 
-    # Start the web server FIRST so Render sees the open port immediately
     start_health_server()
 
     if not TELEGRAM_BOT_TOKEN or not GROQ_API_KEY:
         logger.error("TELEGRAM_BOT_TOKEN and GROQ_API_KEY must be set in Environment Variables!")
-        # keep the health server alive so the deploy does not crash-loop silently
         while True:
             time.sleep(3600)
 
@@ -806,7 +779,7 @@ def main() -> None:
     application = (
         ApplicationBuilder()
         .token(TELEGRAM_BOT_TOKEN)
-        .concurrent_updates(True)          # one slow chat must not block others
+        .concurrent_updates(True)
         .connect_timeout(15)
         .read_timeout(30)
         .write_timeout(60)
@@ -815,8 +788,6 @@ def main() -> None:
         .build()
     )
 
-    # normal messages + Telegram Business (personal account inbox) messages,
-    # but never edited messages
     update_filter = filters.UpdateType.MESSAGE
     if hasattr(filters.UpdateType, "BUSINESS_MESSAGE"):
         update_filter = update_filter | filters.UpdateType.BUSINESS_MESSAGE
