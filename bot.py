@@ -125,21 +125,30 @@ logging.basicConfig(
 logger = logging.getLogger("BlackQueenBot")
 
 # =============================================================================
-# স্থায়ী ও শক্তিশালী হেলথ চেক সার্ভার (404 Not Found সমস্যা চিরতরে দূর করার জন্য)
+# ১০০% কার্যকরী এবং পার্মানেন্ট হেলথ চেক সার্ভার (HEAD, GET, POST সাপোর্ট সহ)
 # =============================================================================
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
-    def handle_request(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/html; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(b"<h1>Black Queen Bot is Alive and Running!</h1>")
+    def handle_request(self, include_body=True):
+        try:
+            response_body = b"<h1>Black Queen Bot is Alive and Running!</h1>"
+            self.send_response(200)
+            self.send_header("Content-type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            if include_body and self.command != "HEAD":
+                self.wfile.write(response_body)
+        except Exception:
+            pass
 
     def do_GET(self):
-        self.handle_request()
+        self.handle_request(include_body=True)
 
     def do_HEAD(self):
-        self.handle_request()
+        self.handle_request(include_body=False)
+
+    def do_POST(self):
+        self.handle_request(include_body=True)
 
     def log_message(self, format, *args):
         pass
@@ -250,6 +259,9 @@ class AIEngine:
         user_message: str,
         user_name: str,
     ) -> str:
+        if not user_message or not user_message.strip():
+            return "জান, তোমার কথাটি ঠিকমতো বুঝতে পারিনি। আরেকবার একটু বলবে?"
+
         if CREATOR_REGEX.search(user_message):
             return (
                 f"আমার প্রাণপ্রিয় মালিক এবং নির্মাতা হলেন **{BOT_CREATOR_NAME}** "
@@ -304,7 +316,7 @@ class AIEngine:
         return "জান, আমি তোমার কথাটা পরিষ্কার বুঝতে পেরেছি, একটু নেটওয়ার্ক স্লো থাকায় উত্তর পেতে দেরি হলো। আরেকবার একটু বলবে সোনা?"
 
     async def transcribe_audio(self, audio_file_path: str) -> Optional[str]:
-        """Groq Whisper দিয়ে বাংলা ভয়েসকে টেক্সটে রূপান্তর (শুনে নেওয়া)।"""
+        """Groq Whisper দিয়ে বাংলা ভয়েসকে নিখুঁতভাবে টেক্সটে রূপান্তর (শুনে নেওয়া)।"""
         try:
             async with httpx.AsyncClient(timeout=35.0) as client:
                 with open(audio_file_path, "rb") as f:
@@ -475,10 +487,10 @@ class BlackQueenBot:
 
     async def process_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
-        ভয়েস মেসেজ প্রসেসিং:
-        - ব্যাকগ্রাউন্ডে ভয়েস শুনে বুঝে নেবে।
-        - চ্যাটে কোনো 'তুমি বলেছ' টেক্সট দেখাবে না (ক্লিন থাকবে)।
-        - আগের কথার স্মৃতি মনে রেখে সরাসরি ভয়েস নোটে উত্তর দেবে।
+        হিউম্যান-লাইক ভয়েস মেসেজ প্রসেসিং:
+        - ইউজারের ভয়েস ডিউরেশন (যেমন ১০ বা ২০ সেকেন্ড) মেপে সেই অনুপাতে ন্যাচরাল ওয়েটিং টাইম ও 'রেকর্ডিং ভয়েস' অ্যাকশন বজায় রাখবে।
+        - চ্যাটে কোনো 'তুমি বলেছ' বা অতিরিক্ত টেক্সট দেখাবে না (ক্লিন থাকবে)।
+        - হুবহু ইউজারের কথার ওপর ভিত্তি করে সঠিক উত্তর ভয়েস নোটে পাঠাবে।
         """
         message = update.effective_message
         chat = update.effective_chat
@@ -501,6 +513,11 @@ class BlackQueenBot:
             self.active_sessions[chat.id] = {}
         self.active_sessions[chat.id][user.id] = now
 
+        # ইউজারের পাঠানো ভয়েসের ডিউরেশন (সেকেন্ড) বের করা (ডিফল্ট ৪ সেকেন্ড যদি না থাকে)
+        voice_duration = message.voice.duration or 4
+        # রিয়েল মানুষের মতো শোনার ও ভাবার সময় ক্যালকুলেশন (যেমন ভয়েস বড় হলে একটু বেশি সময় ভাববে)
+        thinking_delay = min(max(voice_duration * 0.6, 2.0), 12.0)
+
         try:
             await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.RECORD_VOICE)
         except Exception:
@@ -514,7 +531,16 @@ class BlackQueenBot:
             tg_file = await message.voice.get_file()
             await tg_file.download_to_drive(custom_path=temp_audio_path)
 
+            # ব্যাকগ্রাউন্ডে ভয়েস শোনার সময় ধরে রাখা যাতে হিউম্যান ফিল আসে
+            start_time = time.time()
+
             transcription = await self.ai.transcribe_audio(temp_audio_path)
+            
+            # যদি প্রসেসিং দ্রুত হয়ে যায়, তবে ন্যাচরাল ডিউরেশন অনুযায়ী বাকি সময়টুকু ওয়েট করবে
+            elapsed = time.time() - start_time
+            if elapsed < thinking_delay:
+                await asyncio.sleep(thinking_delay - elapsed)
+
             if not transcription:
                 await self._send_voice_reply(context, chat.id, message.message_id, "সোনা, তোমার ভয়েসটা স্পষ্ট শুনতে পাইনি! আরেকবার একটু বলবে?")
                 return
@@ -526,6 +552,12 @@ class BlackQueenBot:
 
             await self.memory.add_message(chat.id, "user", f"{user_name} [ভয়েস]: {transcription}")
             await self.memory.add_message(chat.id, "assistant", bot_reply)
+
+            # উত্তর পাঠানোর আগে ফাইনাল ভয়েস ریکارڈিং অ্যাকশন
+            try:
+                await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.RECORD_VOICE)
+            except Exception:
+                pass
 
             await self._send_voice_reply(context, chat.id, message.message_id, bot_reply)
 
@@ -610,7 +642,7 @@ def main() -> None:
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
-    logger.info(f"ডামি হেলথ চেক সার্ভার সফলভাবে পোর্ট {port}-এ চালু হয়েছে (200 OK প্রস্তুত)।")
+    logger.info(f"ডামি হেলথ চেক সার্ভার সফলভাবে পোর্ট {port}-এ চালু হয়েছে (HEAD/GET/POST 200 OK প্রস্তুত)।")
 
     memory = MemoryManager(DATABASE_PATH)
     ai_engine = AIEngine(groq_key=GROQ_API_KEY)
