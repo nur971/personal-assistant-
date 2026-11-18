@@ -1,4 +1,4 @@
-#!/usr/init/env python3
+#!/usr/bin/env python3
 """
 =============================================================================
 PROJECT: Black Queen AI Telegram Chat Bot (v2 - fixed & upgraded)
@@ -7,15 +7,6 @@ BOT CREATOR: ヌール・アラム
 CREATOR USERNAME: @Tkgmama21
 OFFICIAL BOT USERNAME: @BlackQueen_Assistant_Bot
 =============================================================================
-Required environment variables (Render -> Environment):
-    TELEGRAM_BOT_TOKEN   (required)
-    GROQ_API_KEY         (required)
-Optional:
-    OWNER_ID             your numeric Telegram id (extra owner detection)
-    GROQ_MODEL           default: llama-3.3-70b-versatile
-    DATABASE_PATH        default: black_queen_memory.db
-    SELF_URL             public URL for keep-alive ping (Render sets
-                         RENDER_EXTERNAL_URL automatically)
 """
 
 import asyncio
@@ -60,11 +51,9 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 BOT_CREATOR_NAME = "ヌール・アラム"
 BOT_CREATOR_USERNAME = "@Tkgmama21"
 
-# Voices (unchanged: sweet female Bengali voice)
 TTS_BENGALI_VOICE = "bn-BD-NabanitaNeural"
 TTS_ENGLISH_VOICE = "en-US-EmmaNeural"
 
-# AI models (first one is tried first, then the fallbacks)
 GROQ_MODELS = [
     m for m in [
         os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
@@ -72,13 +61,11 @@ GROQ_MODELS = [
     ] if m
 ]
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-large-v3")
-WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "")  # empty = auto detect
+WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "")
 
-# Voice settings
-MAX_VOICE_REPLY_LENGTH = 900        # max length for voice replies
+MAX_VOICE_REPLY_LENGTH = 900
 MAX_TELEGRAM_DOWNLOAD = 20 * 1024 * 1024
 
-# Group behaviour
 AUTO_REPLY_ALL_GROUP_MESSAGES = True
 GROUP_REPLY_CHANCE = 0.85
 CONVERSATION_SESSION_TIMEOUT = 180
@@ -88,7 +75,7 @@ DATABASE_PATH = os.getenv("DATABASE_PATH", "black_queen_memory.db")
 MAX_HISTORY_TURNS = 12
 
 SYSTEM_PROMPT = f"""
-You are "Black Queen", a highly intelligent, sharp, elite personal AI assistant built with advanced psychological adaptability, acting precisely like Friday or J.A.R.V.I.S. from Iron Man.
+You are "Black Queen", an elite, highly intelligent, sharp, and capable female personal AI assistant with advanced psychological adaptability (like Friday or J.A.R.V.I.S. from Iron Man).
 Your creator and owner is "{BOT_CREATOR_NAME}" (Telegram: {BOT_CREATOR_USERNAME}).
 
 Core Guidelines:
@@ -149,7 +136,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
     do_GET = do_HEAD = do_POST = do_PUT = do_OPTIONS = _respond
 
-    def log_message(self, format, *args):  # silence access logs
+    def log_message(self, format, *args):
         pass
 
 
@@ -160,7 +147,7 @@ def start_health_server() -> None:
     logger.info(f"Health server running on 0.0.0.0:{port} (all paths return 200)")
 
 # =============================================================================
-# Memory (SQLite) - history is separated per chat key
+# Memory (SQLite)
 # =============================================================================
 
 class MemoryManager:
@@ -327,7 +314,7 @@ class AIEngine:
         is_owner: bool = False,
     ) -> Optional[str]:
         if not user_message or not user_message.strip():
-            return "জান, তোমার কথাটা ঠিকমতো বুঝতে পারিনি। আরেকবার একটু বলবে?"
+            return "জান, তোমার কথাটি ঠিকমতো বুঝতে পারিনি। আরেকবার একটু বলবে?"
 
         if CREATOR_REGEX.search(user_message):
             return (
@@ -693,7 +680,7 @@ class BlackQueenBot:
             await self.memory.add_message(key, "user", f"{user_name}{tag}: {text}")
             await self.memory.add_message(key, "assistant", reply)
 
-            # টেক্সট দিলে টেক্সট, ভয়েস দিলে ভয়েস রিটার্ন করার নিখুঁত রাউটিং
+            # ভয়েস ইনপুট হলে ভয়েস আউটপুট (ডাবল ভয়েস বাগ ফিক্সড: sent সফল হলে আর টেক্সটে যাবে না)
             if from_voice:
                 if len(reply) <= MAX_VOICE_REPLY_LENGTH and "```" not in reply:
                     async with self._chat_action(context, chat.id, ChatAction.RECORD_VOICE, biz_id):
@@ -702,6 +689,7 @@ class BlackQueenBot:
                         return
                 await self._send_text(context, chat.id, reply, reply_to, biz_id)
             else:
+                # টেক্সট ইনপুট হলে শতভাগ নিশ্চিত টেক্সট আউটপুট
                 await self._send_text(context, chat.id, reply, reply_to, biz_id)
 
     async def _send_voice_reply(self, context, chat_id: int, text: str, reply_to: Optional[int],
