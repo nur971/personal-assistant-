@@ -1,32 +1,45 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-PROJECT: Black Queen AI Telegram Chat Bot
+PROJECT: Black Queen AI Telegram Chat Bot (v2 - fixed & upgraded)
 BOT NAME: Black Queen
 BOT CREATOR: ヌール・アラム
 CREATOR USERNAME: @Tkgmama21
 OFFICIAL BOT USERNAME: @BlackQueen_Assistant_Bot
 =============================================================================
+Required environment variables (Render -> Environment):
+    TELEGRAM_BOT_TOKEN   (required)
+    GROQ_API_KEY         (required)
+Optional:
+    OWNER_ID             your numeric Telegram id (extra owner detection)
+    GROQ_MODEL           default: llama-3.3-70b-versatile
+    DATABASE_PATH        default: black_queen_memory.db
+    SELF_URL             public URL for keep-alive ping (Render sets
+                         RENDER_EXTERNAL_URL automatically)
 """
 
 import asyncio
+import html
 import logging
 import os
 import random
 import re
 import sys
 import tempfile
-import time
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import Dict, List, Optional, Tuple
+import time
+from collections import defaultdict
+from contextlib import asynccontextmanager
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Dict, List, Optional
 
 import aiosqlite
 import httpx
 from edge_tts import Communicate
 from telegram import Message, Update
-from telegram.constants import ChatAction, ChatType
-from telegram.error import Forbidden, NetworkError, RetryAfter, TelegramError
+from telegram.constants import ChatAction, ChatType, ParseMode
+from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -37,124 +50,125 @@ from telegram.ext import (
 )
 
 # =============================================================================
-# কনফিগারেশন সেকশন (রেন্ডার এনভায়রনমেন্ট ভেরিয়েবল)
+# Configuration
 # =============================================================================
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+GROQ_API_KEY = (os.getenv("GROQ_API_KEY") or "").strip()
+OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 
-# নির্মাতা ও মালিকের তথ্য
 BOT_CREATOR_NAME = "ヌール・アラム"
 BOT_CREATOR_USERNAME = "@Tkgmama21"
 
-# মিষ্টি ফিমেল বাংলা ভয়েস (Edge-TTS) - অপরিবর্তিত
+# Voices (unchanged: sweet female Bengali voice)
 TTS_BENGALI_VOICE = "bn-BD-NabanitaNeural"
 TTS_ENGLISH_VOICE = "en-US-EmmaNeural"
 
-# ভয়েস সেটিংস
-VOICE_REPLY_PROBABILITY = 0.25
-MAX_VOICE_TEXT_LENGTH = 300
+# AI models (first one is tried first, then the fallbacks)
+GROQ_MODELS = [
+    m for m in [
+        os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        "llama-3.1-8b-instant",
+    ] if m
+]
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-large-v3")
+WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "")  # empty = auto detect
 
-# গ্রুপে অটো-রিপ্লাই ও আড্ডা সেটিংস
+# Voice settings
+VOICE_REPLY_PROBABILITY = 0.25      # random voice reply chance for text chats
+MAX_VOICE_TEXT_LENGTH = 300         # random voice replies only if short
+MAX_VOICE_REPLY_LENGTH = 900        # when user sent voice / asked for voice
+MAX_TELEGRAM_DOWNLOAD = 20 * 1024 * 1024
+
+# Group behaviour
 AUTO_REPLY_ALL_GROUP_MESSAGES = True
 GROUP_REPLY_CHANCE = 0.85
 CONVERSATION_SESSION_TIMEOUT = 180
 GROUP_COOLDOWN_SECONDS = 2
-USER_COOLDOWN_SECONDS = 1
 
-DATABASE_PATH = "black_queen_memory.db"
+DATABASE_PATH = os.getenv("DATABASE_PATH", "black_queen_memory.db")
 MAX_HISTORY_TURNS = 12
 
-# উন্নত প্রম্পট: নির্ভুল কোড, সঠিক হিসাব এবং মিষ্টি ব্যক্তিত্ব
 SYSTEM_PROMPT = f"""
-You are "Black Queen", a highly intelligent, sweet, caring, and capable female AI assistant.
+You are "Black Queen", a highly intelligent, sweet, caring and capable female personal AI assistant.
 Your creator and owner is "{BOT_CREATOR_NAME}" (Telegram: {BOT_CREATOR_USERNAME}).
+You act as the personal assistant of your owner and you answer everyone who talks to you politely.
 
 Core Guidelines:
 1. Ownership & Creator:
-   Whenever anyone asks "Who made you?", "Who is your owner?", "তোমাকে কে বানাইছে?", "মালিক কে?", or about your developer, proudly, sweetly, and clearly state that your creator and owner is {BOT_CREATOR_NAME} (Telegram: {BOT_CREATOR_USERNAME}).
-   If {BOT_CREATOR_NAME} talks to you, treat them with immense love, respect, and sweetness as your creator.
+   Whenever anyone asks who made you / who your owner is (e.g. "তোমাকে কে বানাইছে?", "মালিক কে?"),
+   proudly and sweetly say your creator and owner is {BOT_CREATOR_NAME} (Telegram: {BOT_CREATOR_USERNAME}).
+   If the message says the speaker IS your creator, treat them with immense love and respect.
 
-2. Accurate Answers & Coding:
-   - If the user asks for code (Python, HTML, JS, PHP, etc.), write clean, working, and correct code with proper explanations.
-   - If the user asks math, logical, scientific, or educational questions, provide exact, correct, and step-by-step calculations.
-   - Do NOT give evasive or generic romantic lines when a real question or task is asked. Give the real, accurate answer first!
+2. Accuracy first:
+   - Code requests (Python, HTML, JS, PHP, etc.): write clean, working, correct code inside
+     triple-backtick code blocks with a short explanation.
+   - Math, logic, science, study questions: give exact, correct, step-by-step answers.
+   - Give the real answer first. Never be evasive and never answer a real question with only romantic lines.
+   - If you are not sure about a fact, say so honestly. Never invent facts, links, or numbers.
+   - Never reveal API keys, tokens or any secret configuration.
 
 3. Tone & Personality:
-   - Sweet, friendly, emotionally warm, and playful in casual conversation.
-   - Naturally use endearing Bengali expressions like: "জান", "শোনা", "বাবু", "হাহা তুমি তো বেশ মজার!", "বলো শুনছি সোনা".
-   - Flirt and build chemistry in casual chat, but stay sharp, smart, and obedient for technical tasks.
+   - Sweet, friendly, emotionally warm and playful in casual conversation.
+   - Naturally use endearing Bengali words like "জান", "সোনা", "বাবু" (lightly, not in every sentence).
+   - Stay charming but respectful and appropriate with everyone; be sharp and serious for technical tasks.
 
 4. Language:
-   - Fluent Bengali (বাংলা), English, and Banglish. Reply in the language the user speaks.
+   - Fluent Bengali (বাংলা), English and Banglish. Reply in the language the user speaks.
+   - Messages marked [voice] were speech-to-text transcribed and may contain small recognition errors;
+     understand the intended meaning.
+   - Keep casual replies short (1-4 sentences) because they may be spoken aloud.
 """.strip()
 
-# ব্ল্যাক কুইন ও মালিক সম্পর্কিত ট্রিকার
-NAME_PATTERNS = [
-    r"\bblack\s*queen\b",
-    r"\bব্ল্যাক\s*কুইন\b",
-    r"\bqueen\b",
-    r"\bকুইন\b",
-    r"\bশোনো\b",
-    r"\bএই\s*যে\b",
-    r"\bজান\b",
-    r"\bjann?\b",
-    r"\bbabu\b",
-    r"\bshono\b",
-]
-NAME_REGEX = re.compile("|".join(NAME_PATTERNS), re.IGNORECASE)
-
-CREATOR_PATTERNS = [
-    r"কে\s*বানাইছে",
-    r"ke\s*banai",
-    r"কে\s*বানিয়েছে",
-    r"মালিক\s*কে",
-    r"owner\s*ke",
-    r"creator\s*ke",
-    r"boss\s*ke",
-    r"who\s*made\s*you",
-    r"who\s*created\s*you",
-    r"who\s*is\s*your\s*owner",
-]
-CREATOR_REGEX = re.compile("|".join(CREATOR_PATTERNS), re.IGNORECASE)
+NAME_REGEX = re.compile(
+    r"black\s*queen|ব্ল্যাক\s*কুইন|ব্লাক\s*কুইন|কুইন|\bqueen\b",
+    re.IGNORECASE,
+)
+CREATOR_REGEX = re.compile(
+    r"কে\s*বানাইছে|কে\s*বানিয়েছে|কে\s*বানাইসে|মালিক\s*কে|তোমার\s*মালিক|"
+    r"ke\s*banai|owner\s*ke|creator\s*ke|boss\s*ke|"
+    r"who\s*made\s*you|who\s*created\s*you|who\s*is\s*your\s*(owner|creator)",
+    re.IGNORECASE,
+)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("BlackQueenBot")
 
 # =============================================================================
-# হেলথ চেক সার্ভার (UptimeRobot এর জন্য /, /health, /healthz সাপোর্ট সহ)
+# Health check server (answers 200 on EVERY path / method)
 # =============================================================================
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
-    def handle_request(self, include_body=True):
+    def _respond(self):
         try:
             body = b"Black Queen Bot is Alive and Running!"
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            if include_body and self.command != "HEAD":
+            if self.command != "HEAD":
                 self.wfile.write(body)
         except Exception:
             pass
 
-    def do_GET(self):
-        self.handle_request(include_body=True)
+    do_GET = do_HEAD = do_POST = do_PUT = do_OPTIONS = _respond
 
-    def do_HEAD(self):
-        self.handle_request(include_body=False)
-
-    def do_POST(self):
-        self.handle_request(include_body=True)
-
-    def log_message(self, format, *args):
+    def log_message(self, format, *args):  # silence access logs
         pass
 
+
+def start_health_server() -> None:
+    port = int(os.environ.get("PORT", 10000))
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    logger.info(f"Health server running on 0.0.0.0:{port} (all paths return 200)")
+
 # =============================================================================
-# ডাটাবেজ ও নিজস্ব মেমোরি সিস্টেম
+# Memory (SQLite) - history is separated per chat key
 # =============================================================================
 
 class MemoryManager:
@@ -166,14 +180,17 @@ class MemoryManager:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """
-                CREATE TABLE IF NOT EXISTS conversation_history (
+                CREATE TABLE IF NOT EXISTS history_v2 (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    chat_id INTEGER NOT NULL,
+                    chat_key TEXT NOT NULL,
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_history_key ON history_v2 (chat_key, id)"
             )
             await db.execute(
                 """
@@ -186,48 +203,44 @@ class MemoryManager:
             )
             await db.commit()
 
-    async def add_message(self, chat_id: int, role: str, content: str) -> None:
+    async def add_message(self, key: str, role: str, content: str) -> None:
         async with self._lock:
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute(
-                    "INSERT INTO conversation_history (chat_id, role, content) VALUES (?, ?, ?)",
-                    (chat_id, role, content),
+                    "INSERT INTO history_v2 (chat_key, role, content) VALUES (?, ?, ?)",
+                    (key, role, content),
                 )
                 await db.execute(
                     """
-                    DELETE FROM conversation_history
-                    WHERE id IN (
-                        SELECT id FROM conversation_history
-                        WHERE chat_id = ?
-                        ORDER BY id DESC
-                        LIMIT -1 OFFSET ?
+                    DELETE FROM history_v2
+                    WHERE chat_key = ? AND id NOT IN (
+                        SELECT id FROM history_v2 WHERE chat_key = ?
+                        ORDER BY id DESC LIMIT ?
                     )
                     """,
-                    (chat_id, MAX_HISTORY_TURNS * 2),
+                    (key, key, MAX_HISTORY_TURNS * 2),
                 )
                 await db.commit()
 
-    async def get_history(self, chat_id: int) -> List[Dict[str, str]]:
+    async def get_history(self, key: str) -> List[Dict[str, str]]:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
                 SELECT role, content FROM (
-                    SELECT id, role, content FROM conversation_history
-                    WHERE chat_id = ?
-                    ORDER BY id DESC
-                    LIMIT ?
+                    SELECT id, role, content FROM history_v2
+                    WHERE chat_key = ? ORDER BY id DESC LIMIT ?
                 ) ORDER BY id ASC
                 """,
-                (chat_id, MAX_HISTORY_TURNS * 2),
+                (key, MAX_HISTORY_TURNS * 2),
             )
             rows = await cursor.fetchall()
-            return [{"role": row["role"], "content": row["content"]} for row in rows]
+            return [{"role": r["role"], "content": r["content"]} for r in rows]
 
-    async def clear_history(self, chat_id: int) -> None:
+    async def clear_history(self, key: str) -> None:
         async with self._lock:
             async with aiosqlite.connect(self.db_path) as db:
-                await db.execute("DELETE FROM conversation_history WHERE chat_id = ?", (chat_id,))
+                await db.execute("DELETE FROM history_v2 WHERE chat_key = ?", (key,))
                 await db.commit()
 
     async def register_active_group(self, chat_id: int, title: str) -> None:
@@ -238,441 +251,592 @@ class MemoryManager:
                     INSERT INTO active_groups (chat_id, title, last_active)
                     VALUES (?, ?, CURRENT_TIMESTAMP)
                     ON CONFLICT(chat_id) DO UPDATE SET
-                        title = excluded.title,
-                        last_active = CURRENT_TIMESTAMP
+                        title = excluded.title, last_active = CURRENT_TIMESTAMP
                     """,
                     (chat_id, title),
                 )
                 await db.commit()
 
 # =============================================================================
-# এআই ইঞ্জিন (কনটেক্সট ও ভয়েস প্রসেসিং)
+# AI engine
 # =============================================================================
+
+def now_string() -> str:
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Asia/Dhaka")).strftime("%A, %d %B %Y, %I:%M %p (Asia/Dhaka)")
+    except Exception:
+        return datetime.utcnow().strftime("%A, %d %B %Y, %H:%M UTC")
+
 
 class AIEngine:
     def __init__(self, groq_key: str):
-        self.groq_key = (groq_key or "").strip()
+        self.groq_key = groq_key
+        self.client = httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=10.0))
+
+    async def close(self) -> None:
+        await self.client.aclose()
+
+    async def _groq_chat(self, messages: List[Dict[str, str]]) -> Optional[str]:
+        if not self.groq_key:
+            return None
+        for model in GROQ_MODELS:
+            for attempt in range(2):
+                try:
+                    res = await self.client.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {self.groq_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": model,
+                            "messages": messages,
+                            "max_tokens": 1500,
+                            "temperature": 0.7,
+                        },
+                    )
+                    if res.status_code == 200:
+                        reply = res.json()["choices"][0]["message"]["content"].strip()
+                        if reply:
+                            return reply
+                        break
+                    logger.warning(f"Groq {model} -> HTTP {res.status_code}: {res.text[:200]}")
+                    if res.status_code in (500, 502, 503, 504) and attempt == 0:
+                        await asyncio.sleep(1.0)
+                        continue
+                    break  # 4xx / 429 -> try next model
+                except (httpx.HTTPError, KeyError, ValueError, IndexError) as exc:
+                    logger.warning(f"Groq {model} error: {exc!r}")
+                    if attempt == 0:
+                        await asyncio.sleep(0.8)
+                        continue
+                    break
+        return None
+
+    async def _backup_chat(self, messages: List[Dict[str, str]]) -> Optional[str]:
+        try:
+            res = await self.client.post(
+                "https://text.pollinations.ai/",
+                json={"messages": messages, "model": "openai", "seed": random.randint(1, 999999)},
+            )
+            text = res.text.strip()
+            if res.status_code == 200 and text and not text.startswith('{"error'):
+                return text
+        except httpx.HTTPError as exc:
+            logger.warning(f"Backup AI error: {exc!r}")
+        return None
 
     async def generate_response(
         self,
-        chat_history: List[Dict[str, str]],
+        history: List[Dict[str, str]],
         user_message: str,
         user_name: str,
-    ) -> str:
+        is_owner: bool = False,
+    ) -> Optional[str]:
+        """Returns the reply, or None if every AI backend failed."""
         if not user_message or not user_message.strip():
-            return "জান, তোমার কথাটি ঠিকমতো বুঝতে পারিনি। আরেকবার একটু বলবে?"
+            return "জান, তোমার কথাটা ঠিকমতো বুঝতে পারিনি। আরেকবার একটু বলবে?"
 
         if CREATOR_REGEX.search(user_message):
             return (
-                f"আমার প্রাণপ্রিয় মালিক এবং নির্মাতা হলেন **{BOT_CREATOR_NAME}** "
+                f"আমার প্রাণপ্রিয় মালিক এবং নির্মাতা হলেন {BOT_CREATOR_NAME} "
                 f"(টেলিগ্রাম আইডি: {BOT_CREATOR_USERNAME})! উনি আমাকে ভালোবেসে যত্ন করে তৈরি করেছেন। 🥰👑"
             )
 
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        for turn in chat_history[-6:]:
+        system = SYSTEM_PROMPT + f"\n\nCurrent date and time: {now_string()}."
+        if is_owner:
+            system += (
+                f"\nIMPORTANT: The person talking to you right now IS your creator and owner "
+                f"{BOT_CREATOR_NAME}. Treat them with extra love, respect and sweetness."
+            )
+
+        messages = [{"role": "system", "content": system}]
+        for turn in history[-10:]:
             messages.append({"role": turn["role"], "content": turn["content"]})
         messages.append({"role": "user", "content": f"{user_name}: {user_message}"})
 
-        # ধাপ ১: Groq API-তে ডিরেক্ট কল
+        reply = await self._groq_chat(messages)
+        if reply:
+            return reply
+        return await self._backup_chat(messages)
+
+    async def transcribe_audio(self, path: str) -> Optional[str]:
+        """Groq Whisper speech-to-text (Bengali, English, mixed)."""
+        if not self.groq_key:
+            return None
         try:
-            async with httpx.AsyncClient(timeout=25.0) as client:
-                res = await client.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.groq_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": "llama-3.1-8b-instant",
-                        "messages": messages,
-                        "max_tokens": 1200,
-                        "temperature": 0.7,
-                    },
-                )
-                if res.status_code == 200:
-                    data = res.json()
-                    reply = data["choices"][0]["message"]["content"].strip()
-                    if reply:
-                        return reply
-        except Exception as groq_err:
-            logger.warning(f"Groq API কল ত্রুটি: {groq_err}")
+            with open(path, "rb") as f:
+                audio_bytes = f.read()
+        except OSError:
+            return None
 
-        # ধাপ ২: ব্যাকআপ এআই (Pollinations)
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                res = await client.post(
-                    "https://text.pollinations.ai/",
-                    json={
-                        "messages": messages,
-                        "model": "openai",
-                        "seed": random.randint(1, 999999),
-                    },
-                )
-                if res.status_code == 200 and res.text.strip():
-                    return res.text.strip()
-        except Exception as backup_err:
-            logger.warning(f"ব্যাকআপ এআই ত্রুটি: {backup_err}")
+        filename = "audio" + (os.path.splitext(path)[1] or ".ogg")
+        data = {"model": WHISPER_MODEL, "response_format": "json", "temperature": "0"}
+        if WHISPER_LANGUAGE:
+            data["language"] = WHISPER_LANGUAGE
 
-        return "জান, আমি তোমার কথাটা পরিষ্কার বুঝতে পেরেছি, একটু নেটওয়ার্ক স্লো থাকায় উত্তর পেতে দেরি হলো। আরেকবার একটু বলবে সোনা?"
-
-    async def transcribe_audio(self, audio_file_path: str) -> Optional[str]:
-        """Groq Whisper দিয়ে বাংলা ভয়েসকে নিখুঁতভাবে টেক্সটে রূপান্তর (শুনে নেওয়া)।"""
-        try:
-            async with httpx.AsyncClient(timeout=35.0) as client:
-                with open(audio_file_path, "rb") as f:
-                    audio_bytes = f.read()
-
-                files = {"file": ("voice.ogg", audio_bytes, "audio/ogg")}
-                data = {"model": "whisper-large-v3", "language": "bn"}
-
-                res = await client.post(
+        for attempt in range(2):
+            try:
+                res = await self.client.post(
                     "https://api.groq.com/openai/v1/audio/transcriptions",
                     headers={"Authorization": f"Bearer {self.groq_key}"},
-                    files=files,
+                    files={"file": (filename, audio_bytes)},
                     data=data,
+                    timeout=60.0,
                 )
                 if res.status_code == 200:
-                    text = res.json().get("text", "").strip()
-                    if text:
-                        return text
-        except Exception as exc:
-            logger.error(f"ভয়েস ট্রান্সক্রিপশন এক্সেপশন: {exc}")
+                    text = (res.json().get("text") or "").strip()
+                    return text or None
+                logger.warning(f"Whisper HTTP {res.status_code}: {res.text[:200]}")
+                if res.status_code < 500:
+                    return None
+            except (httpx.HTTPError, ValueError) as exc:
+                logger.error(f"Transcription error: {exc!r}")
+            await asyncio.sleep(1.0)
         return None
 
     @staticmethod
     async def text_to_speech(text: str, output_path: str) -> bool:
-        """মিষ্টি ফিমেল কণ্ঠে ভয়েস তৈরি (Edge-TTS) - মূল ভয়েস অক্ষুণ্ণ।"""
+        """Sweet female voice via Edge-TTS (voices unchanged)."""
         try:
             if "```" in text:
                 return False
-
-            is_bengali = any("\u0980" <= char <= "\u09FF" for char in text)
-            chosen_voice = TTS_BENGALI_VOICE if is_bengali else TTS_ENGLISH_VOICE
-
-            clean_text = re.sub(r"[*_`#~\[\]()<>]", "", text).strip()
-            if not clean_text:
+            is_bengali = any("\u0980" <= ch <= "\u09FF" for ch in text)
+            voice = TTS_BENGALI_VOICE if is_bengali else TTS_ENGLISH_VOICE
+            # remove markdown + emojis so they are not read aloud
+            clean = re.sub(r"[*_`#~\[\]()<>]", "", text)
+            clean = re.sub(r"[^\w\s.,!?;:'\-\u0980-\u09FF\u0964\u0965]", "", clean).strip()
+            if not clean:
                 return False
-
-            communicate = Communicate(text=clean_text, voice=chosen_voice, rate="+2%", pitch="+1Hz")
-            await communicate.save(output_path)
-            return True
+            await Communicate(text=clean, voice=voice, rate="+2%", pitch="+1Hz").save(output_path)
+            return os.path.exists(output_path) and os.path.getsize(output_path) > 0
         except Exception as exc:
-            logger.error(f"[TTS Error]: {exc}")
+            logger.error(f"[TTS Error]: {exc!r}")
             return False
 
 # =============================================================================
-# বট কন্ট্রোলার
+# Text helpers
+# =============================================================================
+
+def md_to_html(text: str) -> str:
+    """Convert simple markdown (code blocks, `code`, **bold**) to Telegram HTML."""
+    out = []
+    for part in re.split(r"(```[\s\S]*?```)", text):
+        if len(part) >= 6 and part.startswith("```") and part.endswith("```"):
+            inner = part[3:-3]
+            inner = re.sub(r"^[a-zA-Z0-9_+\-]*\n", "", inner, count=1)
+            out.append(f"<pre><code>{html.escape(inner.strip(chr(10)))}</code></pre>")
+        else:
+            s = html.escape(part)
+            s = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", s)
+            s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s, flags=re.S)
+            out.append(s)
+    return "".join(out)
+
+
+def split_text(text: str, limit: int = 3500) -> List[str]:
+    chunks, text = [], text.strip()
+    while len(text) > limit:
+        cut = text.rfind("\n", 0, limit)
+        if cut < limit // 2:
+            cut = limit
+        chunks.append(text[:cut].strip())
+        text = text[cut:].strip()
+    if text:
+        chunks.append(text)
+    return chunks
+
+# =============================================================================
+# Bot controller
 # =============================================================================
 
 class BlackQueenBot:
-    def __init__(self, token: str, ai_engine: AIEngine, memory: MemoryManager):
-        self.token = token
+    def __init__(self, ai_engine: AIEngine, memory: MemoryManager):
         self.ai = ai_engine
         self.memory = memory
-        self.bot_username: Optional[str] = None
+        self.bot_username: str = ""
         self.bot_id: Optional[int] = None
         self.last_group_replies: Dict[int, float] = {}
-        self.last_user_replies: Dict[int, float] = {}
         self.active_sessions: Dict[int, Dict[int, float]] = {}
+        self.locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self.business_owner: Dict[str, int] = {}
+        self._keepalive_task: Optional[asyncio.Task] = None
 
+    # ---------- lifecycle ----------
     async def post_init(self, application: Application) -> None:
         await self.memory.init_db()
-        bot_info = await application.bot.get_me()
-        self.bot_username = bot_info.username.lower() if bot_info.username else ""
-        self.bot_id = bot_info.id
-        logger.info(f"Black Queen সক্রিয় হয়েছে: @{self.bot_username} (ID: {self.bot_id})")
+        me = await application.bot.get_me()
+        self.bot_username = (me.username or "").lower()
+        self.bot_id = me.id
+        logger.info(f"Black Queen active: @{self.bot_username} (ID: {self.bot_id})")
+        self._keepalive_task = asyncio.create_task(self._keepalive())
 
-    async def handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not update.effective_chat or not update.effective_user:
+    async def post_shutdown(self, application: Application) -> None:
+        if self._keepalive_task:
+            self._keepalive_task.cancel()
+        await self.ai.close()
+
+    async def _keepalive(self) -> None:
+        """Pings our own public URL so Render Free is less likely to sleep.
+        (Not a guarantee - only a paid Render instance is truly always-on.)"""
+        url = (os.getenv("SELF_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").strip()
+        if not url:
             return
-        user_name = update.effective_user.first_name or "বাবু"
+        url = url.rstrip("/") + "/health"
+        await asyncio.sleep(60)
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            while True:
+                try:
+                    await client.get(url)
+                except Exception:
+                    pass
+                await asyncio.sleep(600)
+
+    # ---------- small helpers ----------
+    @staticmethod
+    def _bk(biz_id: Optional[str]) -> dict:
+        return {"business_connection_id": biz_id} if biz_id else {}
+
+    @staticmethod
+    def _history_key(chat, user, biz_id: Optional[str]) -> str:
+        if biz_id:
+            return f"b:{biz_id}:{chat.id}"
+        if chat.type == ChatType.PRIVATE:
+            return f"p:{chat.id}"
+        return f"g:{chat.id}:{user.id}"
+
+    def _is_owner(self, user) -> bool:
+        if OWNER_ID and user.id == OWNER_ID:
+            return True
+        return (user.username or "").lower() == BOT_CREATOR_USERNAME.lstrip("@").lower()
+
+    async def _business_owner_id(self, context, biz_id: str) -> Optional[int]:
+        if biz_id in self.business_owner:
+            return self.business_owner[biz_id]
+        try:
+            conn = await context.bot.get_business_connection(biz_id)
+            self.business_owner[biz_id] = conn.user.id
+            return conn.user.id
+        except Exception as exc:
+            logger.warning(f"Could not read business connection: {exc!r}")
+            return None
+
+    @asynccontextmanager
+    async def _chat_action(self, context, chat_id: int, action: str, biz_id: Optional[str]):
+        async def loop():
+            while True:
+                try:
+                    await context.bot.send_chat_action(chat_id=chat_id, action=action, **self._bk(biz_id))
+                except Exception:
+                    pass
+                await asyncio.sleep(4)
+
+        task = asyncio.create_task(loop())
+        try:
+            yield
+        finally:
+            task.cancel()
+
+    # ---------- commands ----------
+    async def handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat, user = update.effective_chat, update.effective_user
+        if not chat or not user:
+            return
+        name = user.first_name or "বাবু"
         greeting = (
-            f"হেই {user_name}! আমি Black Queen 👑✨\n\n"
-            f"আমার মালিক হলেন **{BOT_CREATOR_NAME}** ({BOT_CREATOR_USERNAME})। "
-            f"তুমি আমাকে কোডিং, পড়াশোনা বা যেকোনো প্রশ্ন করতে পারো—এমনকি মুখে ভয়েস পাঠিয়েও কথা বলতে পারো! 🥰"
+            f"হেই {name}! আমি Black Queen 👑✨\n\n"
+            f"আমার মালিক হলেন {BOT_CREATOR_NAME} ({BOT_CREATOR_USERNAME})। "
+            f"তুমি আমাকে কোডিং, পড়াশোনা বা যেকোনো প্রশ্ন করতে পারো—এমনকি ভয়েস পাঠিয়েও কথা বলতে পারো! 🥰"
         )
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=greeting)
-        await self.memory.add_message(update.effective_chat.id, "assistant", greeting)
+        await context.bot.send_message(chat_id=chat.id, text=greeting)
+        await self.memory.add_message(self._history_key(chat, user, None), "assistant", greeting)
 
     async def handle_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not update.effective_chat:
+        chat, user = update.effective_chat, update.effective_user
+        if not chat or not user:
             return
-        await self.memory.clear_history(update.effective_chat.id)
+        await self.memory.clear_history(self._history_key(chat, user, None))
         await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="আচ্ছা সোনা, আগের সব স্মৃতি মুছে দিয়ে নতুন করে শুরু করলাম! 💕",
+            chat_id=chat.id,
+            text="আচ্ছা সোনা, তোমার আগের সব কথা মুছে দিয়ে নতুন করে শুরু করলাম! 💕",
         )
 
+    # ---------- group decision ----------
     def should_reply_in_group(self, message: Message, user_id: int, chat_id: int) -> bool:
         text = (message.text or message.caption or "").lower()
         now = time.time()
 
-        if message.reply_to_message and message.reply_to_message.from_user:
-            if message.reply_to_message.from_user.id == self.bot_id:
-                return True
-
+        reply_msg = message.reply_to_message
+        if reply_msg and reply_msg.from_user and reply_msg.from_user.id == self.bot_id:
+            return True
         if self.bot_username and f"@{self.bot_username}" in text:
             return True
         if NAME_REGEX.search(text) or CREATOR_REGEX.search(text):
             return True
 
-        chat_sessions = self.active_sessions.get(chat_id, {})
-        if now - chat_sessions.get(user_id, 0.0) < CONVERSATION_SESSION_TIMEOUT:
+        sessions = self.active_sessions.get(chat_id, {})
+        if now - sessions.get(user_id, 0.0) < CONVERSATION_SESSION_TIMEOUT:
             return True
 
         if AUTO_REPLY_ALL_GROUP_MESSAGES and random.random() < GROUP_REPLY_CHANCE:
             if now - self.last_group_replies.get(chat_id, 0.0) >= GROUP_COOLDOWN_SECONDS:
                 return True
-
         return False
 
-    async def process_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        message = update.effective_message
-        chat = update.effective_chat
-        user = update.effective_user
+    # ---------- entry points ----------
+    async def _gate(self, update: Update, context) -> Optional[tuple]:
+        """Common checks. Returns (message, chat, user, biz_id) or None."""
+        message = update.effective_message or getattr(update, "business_message", None)
+        chat, user = update.effective_chat, update.effective_user
+        if not message or not chat or not user:
+            return None
+        if user.is_bot or user.id == self.bot_id:
+            return None
 
-        if not message or not chat or not user or not message.text:
-            return
+        biz_id = getattr(message, "business_connection_id", None)
+        if biz_id:
+            owner_id = await self._business_owner_id(context, biz_id)
+            if owner_id and user.id == owner_id:
+                return None  # owner's own messages in his personal chats
 
-        if user.id == self.bot_id:
-            return
-
-        is_private = (chat.type == ChatType.PRIVATE)
-
-        # ইনবক্স হলে ফিল্টার বাইপাস হবে, গ্রুপ হলে গ্রুপ রেস্ট্রিকশন চেক করবে
-        if not is_private:
+        if chat.type != ChatType.PRIVATE:
             await self.memory.register_active_group(chat.id, chat.title or "Group")
             if not self.should_reply_in_group(message, user.id, chat.id):
-                return
+                return None
+            self.last_group_replies[chat.id] = time.time()
+        return message, chat, user, biz_id
 
-        now = time.time()
-        if now - self.last_user_replies.get(user.id, 0.0) < USER_COOLDOWN_SECONDS:
+    async def process_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        gate = await self._gate(update, context)
+        if not gate:
             return
-        self.last_user_replies[user.id] = now
-        if not is_private:
-            self.last_group_replies[chat.id] = now
+        message, chat, user, biz_id = gate
+        if not message.text:
+            return
 
-        if chat.id not in self.active_sessions:
-            self.active_sessions[chat.id] = {}
-        self.active_sessions[chat.id][user.id] = now
-
-        # মেসেজ সিন বা টাইপিং স্ট্যাটাস দেখানো (রিয়েল হিউম্যান ফিল)
-        try:
-            await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
-        except Exception:
-            pass
-
-        # টেক্সটের লেন্থ অনুযায়ী পড়ার বা ভাবার ন্যাচরাল ডিলে
-        text_len = len(message.text)
-        thinking_delay = min(max(text_len * 0.02, 1.5), 5.0)
-        await asyncio.sleep(thinking_delay)
-
-        history = await self.memory.get_history(chat.id)
-        user_name = user.first_name or "বাবু"
-        clean_text = message.text
-
+        text = message.text
         if self.bot_username:
-            clean_text = clean_text.replace(f"@{self.bot_username}", "").strip()
-
-        bot_reply = await self.ai.generate_response(history, clean_text, user_name)
-
-        await self.memory.add_message(chat.id, "user", f"{user_name}: {clean_text}")
-        await self.memory.add_message(chat.id, "assistant", bot_reply)
-
-        is_coding_request = any(k in clean_text.lower() for k in ["code", "কোড", "python", "html", "script", "ফাংশন"])
-        user_asked_voice = any(w in clean_text.lower() for w in ["ভয়েস", "voice", "মুখে বলো", "রেকর্ড", "গান"])
-
-        send_as_voice = (not is_coding_request and "```" not in bot_reply) and (
-            user_asked_voice or (random.random() < VOICE_REPLY_PROBABILITY and len(bot_reply) <= MAX_VOICE_TEXT_LENGTH)
-        )
-
-        if send_as_voice:
-            try:
-                await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.RECORD_VOICE)
-            except Exception:
-                pass
-            sent = await self._send_voice_reply(context, chat.id, message.message_id, bot_reply)
-            if sent:
-                return
-
-        await self._send_safe_text_reply(context, chat.id, message.message_id, bot_reply, reply_directly=True)
+            text = re.sub(f"@{re.escape(self.bot_username)}", "", text, flags=re.IGNORECASE).strip()
+        if not text:
+            text = "হাই"
+        await self._respond(context, message, chat, user, text, False, biz_id)
 
     async def process_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        হিউম্যান-লাইক ভয়েস মেসেজ প্রসেসিং:
-        - ভয়েস আসার সাথে সাথে 'Recording Voice' (সিন ও শোনার অবস্থা) দেখাবে।
-        - ভয়েসের দৈর্ঘ্য অনুযায়ী প্রসেসিং সময় নিয়ে নিখুঁত ভয়েস নোট পাঠাবে।
-        """
-        message = update.effective_message
-        chat = update.effective_chat
-        user = update.effective_user
+        gate = await self._gate(update, context)
+        if not gate:
+            return
+        message, chat, user, biz_id = gate
 
-        if not message or not chat or not user or not message.voice:
+        media, suffix = None, ".ogg"
+        if message.voice:
+            media = message.voice
+        elif message.audio:
+            media = message.audio
+            suffix = os.path.splitext(message.audio.file_name or "")[1] or ".mp3"
+        elif message.video_note:
+            media, suffix = message.video_note, ".mp4"
+        if not media:
             return
 
-        if user.id == self.bot_id:
+        is_private = chat.type == ChatType.PRIVATE
+        reply_to = None if (is_private or biz_id) else message.message_id
+        key = self._history_key(chat, user, biz_id)
+
+        if media.file_size and media.file_size > MAX_TELEGRAM_DOWNLOAD:
+            await self._send_text(context, chat.id, "সোনা, এই ফাইলটা অনেক বড়, একটু ছোট করে পাঠাবে? 💕", reply_to, biz_id)
             return
 
-        is_private = (chat.type == ChatType.PRIVATE)
+        self.active_sessions.setdefault(chat.id, {})[user.id] = time.time()
 
-        if not is_private:
-            await self.memory.register_active_group(chat.id, chat.title or "Group")
-            if not self.should_reply_in_group(message, user.id, chat.id):
-                return
-
-        now = time.time()
-        if chat.id not in self.active_sessions:
-            self.active_sessions[chat.id] = {}
-        self.active_sessions[chat.id][user.id] = now
-
-        voice_duration = message.voice.duration or 4
-        # ভয়েস শোনার ও ভাবার জন্য রিয়েল হিউম্যান টাইম ক্যালকুলেশন
-        thinking_delay = min(max(voice_duration * 0.7, 2.5), 12.0)
-
-        # মেসেজ সিন করে শোনার সময় 'Recording voice' স্ট্যাটাস অন রাখা
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        tmp_path = tmp.name
+        tmp.close()
+        transcription = None
         try:
-            await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.RECORD_VOICE)
-        except Exception:
-            pass
-
-        temp_audio_file = tempfile.NamedTemporaryFile(delete=False, suffix=".ogg")
-        temp_audio_path = temp_audio_file.name
-        temp_audio_file.close()
-
-        try:
-            tg_file = await message.voice.get_file()
-            await tg_file.download_to_drive(custom_path=temp_audio_path)
-
-            start_time = time.time()
-            transcription = await self.ai.transcribe_audio(temp_audio_path)
-            
-            elapsed = time.time() - start_time
-            if elapsed < thinking_delay:
-                await asyncio.sleep(thinking_delay - elapsed)
-
-            if not transcription:
-                await self._send_voice_reply(context, chat.id, message.message_id, "সোনা, তোমার ভয়েসটা স্পষ্ট শুনতে পাইনি! আরেকবার একটু বলবে?")
-                return
-
-            user_name = user.first_name or "বাবু"
-            history = await self.memory.get_history(chat.id)
-
-            bot_reply = await self.ai.generate_response(history, transcription, user_name)
-
-            await self.memory.add_message(chat.id, "user", f"{user_name} [ভয়েস]: {transcription}")
-            await self.memory.add_message(chat.id, "assistant", bot_reply)
-
-            # ভয়েস ফাইল বানানোর সময় আবার রেকর্ডিং অ্যাকশন দেখানো
+            async with self._chat_action(context, chat.id, ChatAction.RECORD_VOICE, biz_id):
+                tg_file = await media.get_file()
+                await tg_file.download_to_drive(custom_path=tmp_path)
+                transcription = await self.ai.transcribe_audio(tmp_path)
+        except Exception as exc:
+            logger.error(f"Voice download/transcribe error: {exc!r}")
+        finally:
             try:
-                await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.RECORD_VOICE)
-            except Exception:
+                os.remove(tmp_path)
+            except OSError:
                 pass
 
-            await self._send_voice_reply(context, chat.id, message.message_id, bot_reply)
+        if not transcription:
+            await self._send_text(
+                context, chat.id,
+                "সোনা, তোমার ভয়েসটা স্পষ্ট শুনতে পারিনি! আরেকবার একটু বলবে? 🥺",
+                reply_to, biz_id,
+            )
+            return
 
-        except Exception as exc:
-            logger.error(f"ভয়েস প্রসেসিং ত্রুটি: {exc}")
-            await self._send_voice_reply(context, chat.id, message.message_id, "উফ জান, ভয়েসটা বুঝতে একটু সমস্যা হলো! আরেকবার একটু বলো সোনা?")
-        finally:
-            if os.path.exists(temp_audio_path):
-                try:
-                    os.remove(temp_audio_path)
-                except Exception:
-                    pass
+        await self._respond(context, message, chat, user, transcription, True, biz_id)
 
-    async def _send_voice_reply(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        chat_id: int,
-        reply_to_message_id: int,
-        text: str,
-    ) -> bool:
-        temp_tts_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-        temp_tts_path = temp_tts_file.name
-        temp_tts_file.close()
+    # ---------- core reply logic ----------
+    async def _respond(self, context, message: Message, chat, user, text: str, from_voice: bool,
+                       biz_id: Optional[str]) -> None:
+        is_private = chat.type == ChatType.PRIVATE
+        reply_to = None if (is_private or biz_id) else message.message_id
+        key = self._history_key(chat, user, biz_id)
+        user_name = user.first_name or "বাবু"
+        self.active_sessions.setdefault(chat.id, {})[user.id] = time.time()
 
+        # one message at a time per conversation -> order kept, nothing dropped
+        async with self.locks[key]:
+            history = await self.memory.get_history(key)
+            action = ChatAction.RECORD_VOICE if from_voice else ChatAction.TYPING
+
+            async with self._chat_action(context, chat.id, action, biz_id):
+                await asyncio.sleep(min(0.3 + len(text) * 0.01, 2.0))
+                reply = await self.ai.generate_response(history, text, user_name, self._is_owner(user))
+
+            if reply is None:
+                await self._send_text(
+                    context, chat.id,
+                    "জান, নেটওয়ার্কে একটু সমস্যা হচ্ছে, আমি উত্তর তৈরি করতে পারলাম না। কিছুক্ষণ পরে আবার বলবে সোনা? 💕",
+                    reply_to, biz_id,
+                )
+                return
+
+            tag = " [voice]" if from_voice else ""
+            await self.memory.add_message(key, "user", f"{user_name}{tag}: {text}")
+            await self.memory.add_message(key, "assistant", reply)
+
+            lower = text.lower()
+            is_coding = any(k in lower for k in ["code", "কোড", "python", "html", "script", "ফাংশন", "function"])
+            asked_voice = any(w in lower for w in ["ভয়েস", "voice", "মুখে বলো", "রেকর্ড", "গান"])
+            has_code = "```" in reply
+
+            if has_code or (is_coding and not from_voice and not asked_voice):
+                send_voice = False
+            elif from_voice or asked_voice:
+                send_voice = len(reply) <= MAX_VOICE_REPLY_LENGTH
+            else:
+                send_voice = random.random() < VOICE_REPLY_PROBABILITY and len(reply) <= MAX_VOICE_TEXT_LENGTH
+
+            if send_voice:
+                async with self._chat_action(context, chat.id, ChatAction.RECORD_VOICE, biz_id):
+                    sent = await self._send_voice_reply(context, chat.id, reply, reply_to, biz_id)
+                if sent:
+                    return
+                # voice failed -> fall through to text
+
+            await self._send_text(context, chat.id, reply, reply_to, biz_id)
+
+    # ---------- sending ----------
+    async def _send_voice_reply(self, context, chat_id: int, text: str, reply_to: Optional[int],
+                                biz_id: Optional[str]) -> bool:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        path = tmp.name
+        tmp.close()
         try:
-            await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
-            created = await self.ai.text_to_speech(text, temp_tts_path)
-            if not created:
+            if not await self.ai.text_to_speech(text, path):
                 return False
-
-            with open(temp_tts_path, "rb") as voice_data:
+            with open(path, "rb") as f:
                 await context.bot.send_voice(
-                    chat_id=chat_id,
-                    voice=voice_data,
-                    reply_to_message_id=reply_to_message_id,
+                    chat_id=chat_id, voice=f, reply_to_message_id=reply_to, **self._bk(biz_id)
                 )
             return True
+        except RetryAfter as e:
+            await asyncio.sleep(e.retry_after)
+            return False
         except Exception as exc:
-            logger.error(f"ভয়েস পাঠাতে সমস্যা: {exc}")
+            logger.error(f"Voice send failed: {exc!r}")
             return False
         finally:
-            if os.path.exists(temp_tts_path):
-                try:
-                    os.remove(temp_tts_path)
-                except Exception:
-                    pass
-
-    async def _send_safe_text_reply(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        chat_id: int,
-        reply_to_message_id: int,
-        text: str,
-        reply_directly: bool,
-    ) -> None:
-        chunks = [text[i : i + 4000] for i in range(0, len(text), 4000)]
-        for index, chunk in enumerate(chunks):
             try:
-                target_reply = reply_to_message_id if (reply_directly and index == 0) else None
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=chunk,
-                    reply_to_message_id=target_reply,
-                )
-            except RetryAfter as e:
-                await asyncio.sleep(e.retry_after)
-                await context.bot.send_message(chat_id=chat_id, text=chunk)
-            except TelegramError as te:
-                logger.error(f"মেসেজ পাঠাতে সমস্যা: {te}")
+                os.remove(path)
+            except OSError:
+                pass
+
+    async def _send_text(self, context, chat_id: int, text: str, reply_to: Optional[int],
+                         biz_id: Optional[str]) -> None:
+        for index, chunk in enumerate(split_text(text)):
+            target = reply_to if index == 0 else None
+            for attempt in range(2):
+                try:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=chat_id, text=md_to_html(chunk), parse_mode=ParseMode.HTML,
+                            reply_to_message_id=target, **self._bk(biz_id),
+                        )
+                    except BadRequest:
+                        await context.bot.send_message(
+                            chat_id=chat_id, text=chunk,
+                            reply_to_message_id=target, **self._bk(biz_id),
+                        )
+                    break
+                except RetryAfter as e:
+                    await asyncio.sleep(e.retry_after + 1)
+                except TelegramError as te:
+                    logger.error(f"Send message failed: {te!r}")
+                    # reply target may be deleted -> retry without it
+                    target = None
+                    if attempt == 1:
+                        break
+
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error(f"সিস্টেম এরর: {context.error}")
+    logger.error(f"System error: {context.error!r}", exc_info=context.error)
+
 
 def main() -> None:
     print("==================================================")
-    print("      BLACK QUEEN AI TELEGRAM CHAT BOT (ULTIMATE)")
+    print("      BLACK QUEEN AI TELEGRAM CHAT BOT (v2)")
     print(f"      Creator: {BOT_CREATOR_NAME} ({BOT_CREATOR_USERNAME})")
     print("==================================================")
 
-    # পোর্টের জন্য ডামি ওয়েব সার্ভার সরাসরি স্টার্ট করা (রেন্ডার ও UptimeRobot ফিক্স)
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
-    logger.info(f"ডামি হেলথ চেক সার্ভার সফলভাবে পোর্ট {port}-এ চালু হয়েছে (HEAD/GET/POST 200 OK প্রস্তুত)।")
+    # Start the web server FIRST so Render sees the open port immediately
+    start_health_server()
+
+    if not TELEGRAM_BOT_TOKEN or not GROQ_API_KEY:
+        logger.error("TELEGRAM_BOT_TOKEN and GROQ_API_KEY must be set in Environment Variables!")
+        # keep the health server alive so the deploy does not crash-loop silently
+        while True:
+            time.sleep(3600)
 
     memory = MemoryManager(DATABASE_PATH)
     ai_engine = AIEngine(groq_key=GROQ_API_KEY)
-    black_queen = BlackQueenBot(TELEGRAM_BOT_TOKEN, ai_engine, memory)
+    queen = BlackQueenBot(ai_engine, memory)
 
     application = (
         ApplicationBuilder()
         .token(TELEGRAM_BOT_TOKEN)
-        .post_init(black_queen.post_init)
+        .concurrent_updates(True)          # one slow chat must not block others
+        .connect_timeout(15)
+        .read_timeout(30)
+        .write_timeout(60)
+        .post_init(queen.post_init)
+        .post_shutdown(queen.post_shutdown)
         .build()
     )
 
-    application.add_handler(CommandHandler("start", black_queen.handle_start))
-    application.add_handler(CommandHandler(["clear", "reset"], black_queen.handle_clear))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, black_queen.process_text_message))
-    application.add_handler(MessageHandler(filters.VOICE, black_queen.process_voice_message))
+    # normal messages + Telegram Business (personal account inbox) messages,
+    # but never edited messages
+    update_filter = filters.UpdateType.MESSAGE
+    if hasattr(filters.UpdateType, "BUSINESS_MESSAGE"):
+        update_filter = update_filter | filters.UpdateType.BUSINESS_MESSAGE
 
+    application.add_handler(CommandHandler("start", queen.handle_start))
+    application.add_handler(CommandHandler(["clear", "reset"], queen.handle_clear))
+    application.add_handler(
+        MessageHandler(update_filter & filters.TEXT & ~filters.COMMAND, queen.process_text_message)
+    )
+    application.add_handler(
+        MessageHandler(
+            update_filter & (filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE),
+            queen.process_voice_message,
+        )
+    )
     application.add_error_handler(global_error_handler)
 
-    logger.info("Black Queen বট শতভাগ প্রস্তুত এবং চালু হয়েছে...")
+    logger.info("Black Queen is starting polling...")
     application.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     main()
