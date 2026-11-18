@@ -17,6 +17,8 @@ import re
 import sys
 import tempfile
 import time
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, List, Optional, Tuple
 
 import aiosqlite
@@ -122,6 +124,18 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger("BabyQueenBot")
+
+# =============================================================================
+# ডামি ওয়েব সার্ভার (রেন্ডার পোর্ট ফিক্সের জন্য)
+# =============================================================================
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Black Queen Bot is Alive and Running!")
+    def log_message(self, format, *args):
+        pass
 
 # =============================================================================
 # ডাটাবেজ ও মেমোরি
@@ -362,14 +376,14 @@ class BabyQueenBot:
         bot_info = await application.bot.get_me()
         self.bot_username = bot_info.username.lower() if bot_info.username else ""
         self.bot_id = bot_info.id
-        logger.info(f"Baby Queen সক্রিয় হয়েছে: @{self.bot_username} (ID: {self.bot_id})")
+        logger.info(f"Black Queen সক্রিয় হয়েছে: @{self.bot_username} (ID: {self.bot_id})")
 
     async def handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_chat or not update.effective_user:
             return
         user_name = update.effective_user.first_name or "বাবু"
         greeting = (
-            f"হেই {user_name}! আমি Baby Queen 👑✨\n\n"
+            f"হেই {user_name}! আমি Black Queen 👑✨\n\n"
             f"আমার মালিক হলেন **{BOT_CREATOR_NAME}** ({BOT_CREATOR_USERNAME})। "
             f"তুমি আমাকে কোডিং, পড়াশোনা, হিসাব-নিকাশ বা যেকোনো প্রশ্ন করতে পারো—এমনকি মুখে ভয়েস পাঠিয়েও কথা বলতে পারো! 🥰"
         )
@@ -390,23 +404,19 @@ class BabyQueenBot:
         text = (message.text or message.caption or "").lower()
         now = time.time()
 
-        # বটের মেসেজে রিপ্লাই দিলে
         if message.reply_to_message and message.reply_to_message.from_user:
             if message.reply_to_message.from_user.id == self.bot_id:
                 return True
 
-        # নাম ধরে ডাকলে
         if self.bot_username and f"@{self.bot_username}" in text:
             return True
         if NAME_REGEX.search(text) or CREATOR_REGEX.search(text):
             return True
 
-        # সেশন ট্র্যাকিং: ইউজার ৩ মিনিটের মধ্যে কথা বলে থাকলে
         chat_sessions = self.active_sessions.get(chat_id, {})
         if now - chat_sessions.get(user_id, 0.0) < CONVERSATION_SESSION_TIMEOUT:
             return True
 
-        # সাধারণ মেসেজে রিপ্লাই দেওয়া
         if AUTO_REPLY_ALL_GROUP_MESSAGES and random.random() < GROUP_REPLY_CHANCE:
             if now - self.last_group_replies.get(chat_id, 0.0) >= GROUP_COOLDOWN_SECONDS:
                 return True
@@ -431,7 +441,6 @@ class BabyQueenBot:
             if not self.should_reply_in_group(message, user.id, chat.id):
                 return
         else:
-            # বট বিজনেসের মাধ্যমে ইনবক্সে আসা মেসেজ পড়া, দেখা এবং উত্তর দেওয়ার লজিক
             logger.info(f"বট বিজনেস ইনবক্স মেসেজ রিসিভ হয়েছে {user.id} থেকে: {message.text}")
 
         now = time.time()
@@ -440,7 +449,6 @@ class BabyQueenBot:
         self.last_user_replies[user.id] = now
         self.last_group_replies[chat.id] = now
 
-        # আড্ডা সেশন আপডেট
         if chat.id not in self.active_sessions:
             self.active_sessions[chat.id] = {}
         self.active_sessions[chat.id][user.id] = now
@@ -457,13 +465,11 @@ class BabyQueenBot:
         if self.bot_username:
             clean_text = clean_text.replace(f"@{self.bot_username}", "").strip()
 
-        # আসল এআই দিয়ে উত্তর তৈরি
         bot_reply = await self.ai.generate_response(history, clean_text, user_name)
 
         await self.memory.add_message(chat.id, "user", f"{user_name}: {clean_text}")
         await self.memory.add_message(chat.id, "assistant", bot_reply)
 
-        # কোড থাকলে সরাসরি টেক্সটে রিপ্লাই দেবে, অন্যথায় মিষ্টি ভয়েসেও রিপ্লাই হতে পারে
         is_coding_request = any(k in clean_text.lower() for k in ["code", "কোড", "python", "html", "script", "ফাংশন"])
         user_asked_voice = any(w in clean_text.lower() for w in ["ভয়েস", "voice", "মুখে বলো", "রেকর্ড", "গান"])
 
@@ -476,11 +482,9 @@ class BabyQueenBot:
             if sent:
                 return
 
-        # সরাসরি ওই মেসেজের রিপ্লাই হিসেবে সঠিক উত্তর দেওয়া
         await self._send_safe_text_reply(context, chat.id, message.message_id, bot_reply, reply_directly=True)
 
     async def process_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """গ্রুপে বা ইনবক্সে মুখে বলা বাংলা ভয়েস শুনে বুঝে উত্তর দেওয়া।"""
         message = update.effective_message
         chat = update.effective_chat
         user = update.effective_user
@@ -530,7 +534,6 @@ class BabyQueenBot:
             await self.memory.add_message(chat.id, "user", f"{user_name} [ভয়েস]: {transcription}")
             await self.memory.add_message(chat.id, "assistant", bot_reply)
 
-            # ভয়েসের উত্তর মিষ্টি ফিমেল ভয়েসে দেওয়া
             sent = await self._send_voice_reply(context, chat.id, message.message_id, bot_reply)
             if not sent:
                 await message.reply_text(f"🎤 তুমি বলেছ: \"{transcription}\"\n\n{bot_reply}")
@@ -607,29 +610,36 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
 
 def main() -> None:
     print("==================================================")
-    print("      BABY QUEEN AI TELEGRAM CHAT BOT (ULTIMATE)")
+    print("      BLACK QUEEN AI TELEGRAM CHAT BOT (ULTIMATE)")
     print(f"      Creator: {BOT_CREATOR_NAME} ({BOT_CREATOR_USERNAME})")
     print("==================================================")
 
+    # পোর্টের জন্য ডামি ওয়েব সার্ভার সরাসরি স্টার্ট করা (রেন্ডার পোর্ট ফিক্স)
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    logger.info(f"ডামি হেলথ চেক সার্ভার সফলভাবে পোর্ট {port}-এ চালু হয়েছে।")
+
     memory = MemoryManager(DATABASE_PATH)
     ai_engine = AIEngine(groq_key=GROQ_API_KEY)
-    baby_queen = BabyQueenBot(TELEGRAM_BOT_TOKEN, ai_engine, memory)
+    black_queen = BabyQueenBot(TELEGRAM_BOT_TOKEN, ai_engine, memory)
 
     application = (
         ApplicationBuilder()
         .token(TELEGRAM_BOT_TOKEN)
-        .post_init(baby_queen.post_init)
+        .post_init(black_queen.post_init)
         .build()
     )
 
-    application.add_handler(CommandHandler("start", baby_queen.handle_start))
-    application.add_handler(CommandHandler(["clear", "reset"], baby_queen.handle_clear))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, baby_queen.process_text_message))
-    application.add_handler(MessageHandler(filters.VOICE, baby_queen.process_voice_message))
+    application.add_handler(CommandHandler("start", black_queen.handle_start))
+    application.add_handler(CommandHandler(["clear", "reset"], black_queen.handle_clear))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, black_queen.process_text_message))
+    application.add_handler(MessageHandler(filters.VOICE, black_queen.process_voice_message))
 
     application.add_error_handler(global_error_handler)
 
-    logger.info("Baby Queen বট শতভাগ প্রস্তুত এবং চালু হয়েছে...")
+    logger.info("Black Queen বট শতভাগ প্রস্তুত এবং চালু হয়েছে...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
