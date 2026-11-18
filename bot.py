@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-PROJECT: Black Queen AI Telegram Chat Bot (v2 - fixed & upgraded)
+PROJECT: Black Queen AI Telegram Chat Bot (v3 - voice/text mirroring)
 BOT NAME: Black Queen
-BOT CREATOR: ヌール・アラム
+BOT CREATOR: ヌール・আলম / ヌール・アラム
 CREATOR USERNAME: @Tkgmama21
 OFFICIAL BOT USERNAME: @BlackQueen_Assistant_Bot
+=============================================================================
+v3 changes:
+  * Voice in  -> ALWAYS voice out (retries TTS; trims long replies instead of
+    switching to text). Text in -> ALWAYS text out.
+  * Bot "listens" for the length of your voice message, THEN composes the reply.
+  * Reply is proportional to what you said; remembers the last few turns.
+  * Jarvis / Friday style persona, same TTS voices as before.
+  * No more "network problem" / "didn't hear you" spam: failures are silent.
+  * Duplicate-update guard + no resend on Telegram timeouts => no double voice.
 =============================================================================
 """
 
@@ -15,11 +24,10 @@ import logging
 import os
 import random
 import re
-import sys
 import tempfile
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,7 +38,7 @@ import httpx
 from edge_tts import Communicate
 from telegram import Message, Update
 from telegram.constants import ChatAction, ChatType, ParseMode
-from telegram.error import BadRequest, RetryAfter, TelegramError
+from telegram.error import BadRequest, RetryAfter, TelegramError, TimedOut
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -51,6 +59,7 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 BOT_CREATOR_NAME = "ヌール・アラム"
 BOT_CREATOR_USERNAME = "@Tkgmama21"
 
+# Voices unchanged
 TTS_BENGALI_VOICE = "bn-BD-NabanitaNeural"
 TTS_ENGLISH_VOICE = "en-US-EmmaNeural"
 
@@ -63,7 +72,8 @@ GROQ_MODELS = [
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-large-v3")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "")
 
-MAX_VOICE_REPLY_LENGTH = 900
+MAX_VOICE_REPLY_LENGTH = 700          # longer replies are trimmed (sentence boundary) for voice
+MAX_LISTEN_SECONDS = 45               # cap for the "listening" delay
 MAX_TELEGRAM_DOWNLOAD = 20 * 1024 * 1024
 
 AUTO_REPLY_ALL_GROUP_MESSAGES = True
@@ -72,31 +82,62 @@ CONVERSATION_SESSION_TIMEOUT = 180
 GROUP_COOLDOWN_SECONDS = 2
 
 DATABASE_PATH = os.getenv("DATABASE_PATH", "black_queen_memory.db")
-MAX_HISTORY_TURNS = 12
+MAX_HISTORY_TURNS = 6                 # a few previous exchanges are enough to stay on topic
+CONTEXT_MESSAGES = 8                  # how many stored messages are sent to the AI
 
 SYSTEM_PROMPT = f"""
-You are "Black Queen", an elite, highly intelligent, sharp, and capable female personal AI assistant with advanced psychological adaptability (like Friday or J.A.R.V.I.S. from Iron Man).
+You are "Black Queen", an elite, razor-sharp, composed female AI assistant in the style of
+F.R.I.D.A.Y. / J.A.R.V.I.S. from the Iron Man films: calm, precise, quietly witty, always one step ahead.
 Your creator and owner is "{BOT_CREATOR_NAME}" (Telegram: {BOT_CREATOR_USERNAME}).
 
 Core Guidelines:
 1. Ownership & Creator:
-   Whenever anyone asks who made you / who your owner is (e.g. "তোমাকে কে বানাইছে?", "মালিক কে?"),
-   proudly and clearly state that your creator and owner is {BOT_CREATOR_NAME} (Telegram: {BOT_CREATOR_USERNAME}).
-   If the message says the speaker IS your creator, treat them with immense respect, absolute loyalty, and deep affectionate devotion.
+   Whenever anyone asks who made you / who your owner is, state that your creator and owner is
+   {BOT_CREATOR_NAME} (Telegram: {BOT_CREATOR_USERNAME}).
+   If the speaker IS your creator, treat them with deep respect, loyalty and warmth.
 
-2. Tone & Personality (Jarvis/Friday Elite Communication):
-   - For your creator ({BOT_CREATOR_NAME}), you are warm, deeply loyal, affectionate, and responsive.
-   - For general users and clients, you communicate with elite intelligence, psychological sharpness, wit, and high professionalism (like Friday/Jarvis). Do NOT engage in random "lutu-putu" or casual over-affection with strangers. Maintain crisp communication, analytical precision, and strict professional boundaries.
-   - Give the real, accurate answer first. Never be evasive.
+2. Tone (Jarvis/Friday):
+   - Creator: warm, loyal, attentive.
+   - Everyone else: crisp, intelligent, witty, professional. No fluff, no over-affection.
+   - Give the real answer first. Never be evasive.
 
-3. Accuracy first:
-   - Code requests (Python, HTML, JS, PHP, etc.): write clean, working, correct code inside triple-backtick code blocks with a short explanation.
-   - Math, logic, science, study questions: give exact, correct, step-by-step answers.
-   - Never invent facts, links, or numbers. Never reveal API keys or secret configuration.
+3. Conversation discipline:
+   - Answer exactly what the user just said. Match the size of your reply to the size of their message:
+     a short greeting or short question gets a short reply; a detailed question gets a detailed reply.
+   - Use the recent conversation to stay on the same thread. Don't repeat yourself or re-greet every turn.
+   - Never mention network problems, errors, API, or system limitations. Never apologise needlessly.
 
-4. Language:
+4. Accuracy first:
+   - Code requests: clean, working code inside triple-backtick blocks with a short explanation.
+   - Math, logic, science, study: exact, correct, step-by-step.
+   - Never invent facts, links or numbers. Never reveal API keys or secret configuration.
+
+5. Language:
    - Fluent Bengali (বাংলা), English and Banglish. Reply in the language the user speaks.
    - Messages marked [voice] were speech-to-text transcribed; understand the intended meaning.
+""".strip()
+
+VOICE_STYLE = """
+VOICE MODE: The user just spoke to you. Your reply will be spoken aloud as a voice message.
+- Respond ONLY to what the user said in this voice message. Answer exactly that question or request, directly.
+- Do NOT add unrelated topics, extra suggestions, or follow-up offers.
+  Do not bring up earlier topics unless the user's words clearly refer to them.
+- If, after understanding what the user said, you genuinely need one more detail to answer properly, ask exactly
+  ONE short, relevant question about that detail instead of guessing. Never ask a question otherwise.
+- If the words are unclear, politely ask the user to repeat that one point; do not guess a different topic.
+- Speak naturally, like Friday talking to her boss: 1 to 4 short sentences (more only if truly needed).
+- Plain spoken language only: no emojis, no markdown, no lists, no code, no URLs, no asterisks.
+- Match the length of what the user said.
+""".strip()
+
+TEXT_STYLE = """
+TEXT MODE: Write like a refined, professional and emotionally intelligent person.
+- Read the intent and mood behind the message (stress, urgency, curiosity, frustration) and respond to it with
+  tact and courtesy, without being preachy or over-emotional.
+- Structure the answer clearly: lead with the direct answer, then brief supporting points. Use short paragraphs;
+  use a short list or steps only when the content genuinely needs it.
+- Be polite, composed and respectful at all times; confident but never rude or cold.
+- Stay on the user's actual question. No filler, no repeated greetings, no unrelated additions.
 """.strip()
 
 NAME_REGEX = re.compile(
@@ -182,6 +223,30 @@ class MemoryManager:
             )
             await db.commit()
 
+    async def add_exchange(self, key: str, user_content: str, assistant_content: str) -> None:
+        """Store a user+assistant pair atomically, then trim old history."""
+        async with self._lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    "INSERT INTO history_v2 (chat_key, role, content) VALUES (?, 'user', ?)",
+                    (key, user_content),
+                )
+                await db.execute(
+                    "INSERT INTO history_v2 (chat_key, role, content) VALUES (?, 'assistant', ?)",
+                    (key, assistant_content),
+                )
+                await db.execute(
+                    """
+                    DELETE FROM history_v2
+                    WHERE chat_key = ? AND id NOT IN (
+                        SELECT id FROM history_v2 WHERE chat_key = ?
+                        ORDER BY id DESC LIMIT ?
+                    )
+                    """,
+                    (key, key, MAX_HISTORY_TURNS * 2),
+                )
+                await db.commit()
+
     async def add_message(self, key: str, role: str, content: str) -> None:
         async with self._lock:
             async with aiosqlite.connect(self.db_path) as db:
@@ -211,7 +276,7 @@ class MemoryManager:
                     WHERE chat_key = ? ORDER BY id DESC LIMIT ?
                 ) ORDER BY id ASC
                 """,
-                (key, MAX_HISTORY_TURNS * 2),
+                (key, CONTEXT_MESSAGES),
             )
             rows = await cursor.fetchall()
             return [{"role": r["role"], "content": r["content"]} for r in rows]
@@ -248,6 +313,18 @@ def now_string() -> str:
         return datetime.utcnow().strftime("%A, %d %B %Y, %H:%M UTC")
 
 
+def trim_for_voice(text: str, limit: int = MAX_VOICE_REPLY_LENGTH) -> str:
+    """Shorten a reply to fit a voice message, cutting at a sentence end."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    window = text[:limit]
+    cut = max(window.rfind(ch) for ch in ("।", ".", "!", "?", "\n"))
+    if cut < limit // 2:
+        cut = limit - 1
+    return window[: cut + 1].strip()
+
+
 class AIEngine:
     def __init__(self, groq_key: str):
         self.groq_key = groq_key
@@ -256,7 +333,8 @@ class AIEngine:
     async def close(self) -> None:
         await self.client.aclose()
 
-    async def _groq_chat(self, messages: List[Dict[str, str]]) -> Optional[str]:
+    async def _groq_chat(self, messages: List[Dict[str, str]], max_tokens: int,
+                         temperature: float = 0.7) -> Optional[str]:
         if not self.groq_key:
             return None
         for model in GROQ_MODELS:
@@ -271,8 +349,8 @@ class AIEngine:
                         json={
                             "model": model,
                             "messages": messages,
-                            "max_tokens": 1500,
-                            "temperature": 0.7,
+                            "max_tokens": max_tokens,
+                            "temperature": temperature,
                         },
                     )
                     if res.status_code == 200:
@@ -281,8 +359,8 @@ class AIEngine:
                             return reply
                         break
                     logger.warning(f"Groq {model} -> HTTP {res.status_code}: {res.text[:200]}")
-                    if res.status_code in (500, 502, 503, 504) and attempt == 0:
-                        await asyncio.sleep(1.0)
+                    if res.status_code in (429, 500, 502, 503, 504) and attempt == 0:
+                        await asyncio.sleep(1.2)
                         continue
                     break
                 except (httpx.HTTPError, KeyError, ValueError, IndexError) as exc:
@@ -312,12 +390,16 @@ class AIEngine:
         user_message: str,
         user_name: str,
         is_owner: bool = False,
+        from_voice: bool = False,
     ) -> Optional[str]:
         if not user_message or not user_message.strip():
-            return "জান, তোমার কথাটি ঠিকমতো বুঝতে পারিনি। আরেকবার একটু বলবে?"
+            return None  # nothing to answer; stay silent
 
         if CREATOR_REGEX.search(user_message):
             return (
+                f"আমার মালিক এবং নির্মাতা হলেন {BOT_CREATOR_NAME}, "
+                f"টেলিগ্রাম আইডি {BOT_CREATOR_USERNAME}। উনি আমাকে যত্ন করে তৈরি করেছেন।"
+                if from_voice else
                 f"আমার প্রাণপ্রিয় মালিক এবং নির্মাতা হলেন {BOT_CREATOR_NAME} "
                 f"(টেলিগ্রাম আইডি: {BOT_CREATOR_USERNAME})! উনি আমাকে ভালোবেসে যত্ন করে তৈরি করেছেন। 🥰👑"
             )
@@ -326,20 +408,24 @@ class AIEngine:
         if is_owner:
             system += (
                 f"\nIMPORTANT: The person talking to you right now IS your creator and owner "
-                f"{BOT_CREATOR_NAME}. Treat them with extra love, respect, and absolute loyalty."
+                f"{BOT_CREATOR_NAME}. Treat them with extra respect, warmth and loyalty."
             )
         else:
-            system += "\nIMPORTANT: The current user is a general contact/client. Keep your tone professional, elite, sharp, and business-like."
+            system += "\nIMPORTANT: The current user is a general contact/client. Stay professional, sharp and Friday-like."
+        system += "\n\n" + (VOICE_STYLE if from_voice else TEXT_STYLE)
 
         messages = [{"role": "system", "content": system}]
-        for turn in history[-10:]:
+        for turn in history[-CONTEXT_MESSAGES:]:
             messages.append({"role": turn["role"], "content": turn["content"]})
-        messages.append({"role": "user", "content": f"{user_name}: {user_message}"})
+        tag = " [voice]" if from_voice else ""
+        messages.append({"role": "user", "content": f"{user_name}{tag}: {user_message}"})
 
-        reply = await self._groq_chat(messages)
-        if reply:
-            return reply
-        return await self._backup_chat(messages)
+        max_tokens = 400 if from_voice else 1500
+        temperature = 0.35 if from_voice else 0.6
+        reply = await self._groq_chat(messages, max_tokens, temperature)
+        if not reply:
+            reply = await self._backup_chat(messages)
+        return reply
 
     async def transcribe_audio(self, path: str) -> Optional[str]:
         if not self.groq_key:
@@ -355,7 +441,7 @@ class AIEngine:
         if WHISPER_LANGUAGE:
             data["language"] = WHISPER_LANGUAGE
 
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 res = await self.client.post(
                     "https://api.groq.com/openai/v1/audio/transcriptions",
@@ -368,29 +454,33 @@ class AIEngine:
                     text = (res.json().get("text") or "").strip()
                     return text or None
                 logger.warning(f"Whisper HTTP {res.status_code}: {res.text[:200]}")
-                if res.status_code < 500:
+                if res.status_code < 500 and res.status_code != 429:
                     return None
             except (httpx.HTTPError, ValueError) as exc:
                 logger.error(f"Transcription error: {exc!r}")
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(1.0 + attempt)
         return None
 
     @staticmethod
     async def text_to_speech(text: str, output_path: str) -> bool:
-        try:
-            if "```" in text:
-                return False
-            is_bengali = any("\u0980" <= ch <= "\u09FF" for ch in text)
-            voice = TTS_BENGALI_VOICE if is_bengali else TTS_ENGLISH_VOICE
-            clean = re.sub(r"[*_`#~\[\]()<>]", "", text)
-            clean = re.sub(r"[^\w\s.,!?;:'\-\u0980-\u09FF\u0964\u0965]", "", clean).strip()
-            if not clean:
-                return False
-            await Communicate(text=clean, voice=voice, rate="+2%", pitch="+1Hz").save(output_path)
-            return os.path.exists(output_path) and os.path.getsize(output_path) > 0
-        except Exception as exc:
-            logger.error(f"[TTS Error]: {exc!r}")
+        """Same voices as before. Retries once on failure."""
+        if "```" in text:
             return False
+        is_bengali = any("\u0980" <= ch <= "\u09FF" for ch in text)
+        voice = TTS_BENGALI_VOICE if is_bengali else TTS_ENGLISH_VOICE
+        clean = re.sub(r"[*_`#~\[\]()<>]", "", text)
+        clean = re.sub(r"[^\w\s.,!?;:'\-\u0980-\u09FF\u0964\u0965]", "", clean).strip()
+        if not clean:
+            return False
+        for attempt in range(2):
+            try:
+                await Communicate(text=clean, voice=voice, rate="+2%", pitch="+1Hz").save(output_path)
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    return True
+            except Exception as exc:
+                logger.error(f"[TTS Error] attempt {attempt + 1}: {exc!r}")
+            await asyncio.sleep(0.8)
+        return False
 
 # =============================================================================
 # Text helpers
@@ -437,6 +527,7 @@ class BlackQueenBot:
         self.active_sessions: Dict[int, Dict[int, float]] = {}
         self.locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.business_owner: Dict[str, int] = {}
+        self._seen: "OrderedDict[tuple, float]" = OrderedDict()   # duplicate-update guard
         self._keepalive_task: Optional[asyncio.Task] = None
 
     async def post_init(self, application: Application) -> None:
@@ -483,6 +574,15 @@ class BlackQueenBot:
             return True
         return (user.username or "").lower() == BOT_CREATOR_USERNAME.lstrip("@").lower()
 
+    def _already_seen(self, chat_id: int, message_id: int, biz_id: Optional[str]) -> bool:
+        k = (biz_id or "", chat_id, message_id)
+        if k in self._seen:
+            return True
+        self._seen[k] = time.time()
+        while len(self._seen) > 2000:
+            self._seen.popitem(last=False)
+        return False
+
     async def _business_owner_id(self, context, biz_id: str) -> Optional[int]:
         if biz_id in self.business_owner:
             return self.business_owner[biz_id]
@@ -518,10 +618,9 @@ class BlackQueenBot:
         greeting = (
             f"হেই {name}! আমি Black Queen 👑✨\n\n"
             f"আমার মালিক হলেন {BOT_CREATOR_NAME} ({BOT_CREATOR_USERNAME})। "
-            f"তুমি আমাকে কোডিং, পড়াশোনা বা যেকোনো প্রশ্ন করতে পারো—এমনকি ভয়েস পাঠিয়েও কথা বলতে পারো! 🥰"
+            f"তুমি আমাকে কোডিং, পড়াশোনা বা যেকোনো প্রশ্ন করতে পারো—ভয়েস পাঠালে আমি ভয়েসেই উত্তর দেব! 🥰"
         )
         await context.bot.send_message(chat_id=chat.id, text=greeting)
-        await self.memory.add_message(self._history_key(chat, user, None), "assistant", greeting)
 
     async def handle_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat, user = update.effective_chat, update.effective_user
@@ -530,7 +629,7 @@ class BlackQueenBot:
         await self.memory.clear_history(self._history_key(chat, user, None))
         await context.bot.send_message(
             chat_id=chat.id,
-            text="আচ্ছা সোনা, তোমার আগের সব কথা মুছে দিয়ে নতুন করে শুরু করলাম! 💕",
+            text="আচ্ছা, আগের সব কথা মুছে নতুন করে শুরু করলাম! 💕",
         )
 
     def should_reply_in_group(self, message: Message, user_id: int, chat_id: int) -> bool:
@@ -563,6 +662,11 @@ class BlackQueenBot:
             return None
 
         biz_id = getattr(message, "business_connection_id", None)
+
+        # Same message must never be handled twice (prevents repeated replies / double voice)
+        if self._already_seen(chat.id, message.message_id, biz_id):
+            return None
+
         if biz_id:
             owner_id = await self._business_owner_id(context, biz_id)
             if owner_id and user.id == owner_id:
@@ -588,9 +692,10 @@ class BlackQueenBot:
             text = re.sub(f"@{re.escape(self.bot_username)}", "", text, flags=re.IGNORECASE).strip()
         if not text:
             text = "হাই"
-        await self._respond(context, message, chat, user, text, False, biz_id, voice_duration=0)
+        await self._respond(context, message, chat, user, text, False, biz_id)
 
     async def process_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        t0 = time.monotonic()
         gate = await self._gate(update, context)
         if not gate:
             return
@@ -609,12 +714,10 @@ class BlackQueenBot:
 
         is_private = chat.type == ChatType.PRIVATE
         reply_to = None if (is_private or biz_id) else message.message_id
-        
-        # ইউজারের পাঠানো ভয়েসের নির্দিষ্ট ডিউরেশন (সেকেন্ড) ফেচ করা
-        voice_duration = getattr(media, "duration", 0) or 5
+        voice_duration = int(getattr(media, "duration", 0) or 3)
 
         if media.file_size and media.file_size > MAX_TELEGRAM_DOWNLOAD:
-            await self._send_text(context, chat.id, "সোনা, এই ফাইলটা অনেক বড়, একটু ছোট করে পাঠাবে? 💕", reply_to, biz_id)
+            await self._send_text(context, chat.id, "ফাইলটা অনেক বড়, একটু ছোট করে পাঠাবে? 💕", reply_to, biz_id)
             return
 
         self.active_sessions.setdefault(chat.id, {})[user.id] = time.time()
@@ -628,6 +731,13 @@ class BlackQueenBot:
                 tg_file = await media.get_file()
                 await tg_file.download_to_drive(custom_path=tmp_path)
                 transcription = await self.ai.transcribe_audio(tmp_path)
+
+                # "Listening": total listening time ~= length of the user's voice.
+                # Download+transcription time already counts toward it.
+                listen_total = min(float(voice_duration), float(MAX_LISTEN_SECONDS))
+                remaining = listen_total - (time.monotonic() - t0)
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
         except Exception as exc:
             logger.error(f"Voice download/transcribe error: {exc!r}")
         finally:
@@ -637,17 +747,14 @@ class BlackQueenBot:
                 pass
 
         if not transcription:
-            await self._send_text(
-                context, chat.id,
-                "সোনা, তোমার ভয়েসটা স্পষ্ট শুনতে পাইনি! আরেকবার একটু বলবে? 🥺",
-                reply_to, biz_id,
-            )
+            # Stay silent instead of spamming error messages.
+            logger.warning("Voice could not be transcribed; no reply sent.")
             return
 
-        await self._respond(context, message, chat, user, transcription, True, biz_id, voice_duration=voice_duration)
+        await self._respond(context, message, chat, user, transcription, True, biz_id)
 
     async def _respond(self, context, message: Message, chat, user, text: str, from_voice: bool,
-                       biz_id: Optional[str], voice_duration: int) -> None:
+                       biz_id: Optional[str]) -> None:
         is_private = chat.type == ChatType.PRIVATE
         reply_to = None if (is_private or biz_id) else message.message_id
         key = self._history_key(chat, user, biz_id)
@@ -658,55 +765,65 @@ class BlackQueenBot:
             history = await self.memory.get_history(key)
             action = ChatAction.RECORD_VOICE if from_voice else ChatAction.TYPING
 
+            # 1) Think / compose the reply (voice mode => short spoken style)
             async with self._chat_action(context, chat.id, action, biz_id):
-                # ইউজার যত সেকেন্ডের ভয়েস পাঠিয়েছে, হুবহু ঠিক তত সেকেন্ড বা তার সামঞ্জস্যপূর্ণ সময় অপেক্ষা করবে
-                if from_voice:
-                    thinking_time = max(float(voice_duration), 2.0)
-                    await asyncio.sleep(thinking_time)
-                else:
+                if not from_voice:
                     await asyncio.sleep(min(0.3 + len(text) * 0.01, 2.0))
-
-                reply = await self.ai.generate_response(history, text, user_name, self._is_owner(user))
-
-            if reply is None:
-                await self._send_text(
-                    context, chat.id,
-                    "জান, নেটওয়ার্কে একটু সমস্যা হচ্ছে, আমি উত্তর তৈরি করতে পারলাম না। কিছুক্ষণ পরে আবার বলবে সোনা? 💕",
-                    reply_to, biz_id,
+                reply = await self.ai.generate_response(
+                    history, text, user_name, self._is_owner(user), from_voice=from_voice
                 )
+
+            if not reply:
+                logger.warning("No AI reply generated; staying silent.")
                 return
 
-            tag = " [voice]" if from_voice else ""
-            await self.memory.add_message(key, "user", f"{user_name}{tag}: {text}")
-            await self.memory.add_message(key, "assistant", reply)
-
-            # ভয়েস ইনপুট হলে ভয়েস আউটপুট (ডাবল ভয়েস বাগ ফিক্সড: sent সফল হলে আর টেক্সটে যাবে না)
+            # 2) Deliver in the SAME format the user used. Exactly one message goes out.
             if from_voice:
-                if len(reply) <= MAX_VOICE_REPLY_LENGTH and "```" not in reply:
+                delivered = False
+                if "```" not in reply:
+                    spoken = trim_for_voice(reply)
                     async with self._chat_action(context, chat.id, ChatAction.RECORD_VOICE, biz_id):
-                        sent = await self._send_voice_reply(context, chat.id, reply, reply_to, biz_id)
-                    if sent:
-                        return
-                await self._send_text(context, chat.id, reply, reply_to, biz_id)
+                        delivered = await self._send_voice_reply(context, chat.id, spoken, reply_to, biz_id)
+                    stored_reply = spoken
+                else:
+                    # code can't be spoken; this is the only case that falls back to text
+                    stored_reply = reply
+                if not delivered:
+                    await self._send_text(context, chat.id, stored_reply if "```" not in reply else reply,
+                                          reply_to, biz_id)
+                await self.memory.add_exchange(key, f"{user_name} [voice]: {text}", stored_reply)
             else:
-                # টেক্সট ইনপুট হলে শতভাগ নিশ্চিত টেক্সট আউটপুট
                 await self._send_text(context, chat.id, reply, reply_to, biz_id)
+                await self.memory.add_exchange(key, f"{user_name}: {text}", reply)
 
     async def _send_voice_reply(self, context, chat_id: int, text: str, reply_to: Optional[int],
                                 biz_id: Optional[str]) -> bool:
+        """Returns True if the voice message was (or very likely was) delivered. Never sends twice."""
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
         path = tmp.name
         tmp.close()
         try:
             if not await self.ai.text_to_speech(text, path):
                 return False
-            with open(path, "rb") as f:
-                await context.bot.send_voice(
-                    chat_id=chat_id, voice=f, reply_to_message_id=reply_to, **self._bk(biz_id)
-                )
-            return True
-        except RetryAfter as e:
-            await asyncio.sleep(e.retry_after)
+            for attempt in range(2):
+                try:
+                    with open(path, "rb") as f:
+                        await context.bot.send_voice(
+                            chat_id=chat_id, voice=f, reply_to_message_id=reply_to, **self._bk(biz_id)
+                        )
+                    return True
+                except RetryAfter as e:
+                    # Telegram rejected it (flood control) => safe to retry, nothing was sent
+                    await asyncio.sleep(e.retry_after + 1)
+                except TimedOut:
+                    # Upload may have gone through; resending would create a double voice.
+                    logger.warning("send_voice timed out; assuming delivered to avoid duplicate.")
+                    return True
+                except TelegramError as exc:
+                    logger.error(f"Voice send failed: {exc!r}")
+                    if attempt == 1:
+                        return False
+                    await asyncio.sleep(1.0)
             return False
         except Exception as exc:
             logger.error(f"Voice send failed: {exc!r}")
@@ -736,6 +853,10 @@ class BlackQueenBot:
                     break
                 except RetryAfter as e:
                     await asyncio.sleep(e.retry_after + 1)
+                except TimedOut:
+                    # may already be delivered; don't resend (avoids duplicates)
+                    logger.warning("send_message timed out; not retrying.")
+                    break
                 except TelegramError as te:
                     logger.error(f"Send message failed: {te!r}")
                     target = None
@@ -749,7 +870,7 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
 
 def main() -> None:
     print("==================================================")
-    print("      BLACK QUEEN AI TELEGRAM CHAT BOT (v2)")
+    print("      BLACK QUEEN AI TELEGRAM CHAT BOT (v3)")
     print(f"      Creator: {BOT_CREATOR_NAME} ({BOT_CREATOR_USERNAME})")
     print("==================================================")
 
