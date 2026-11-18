@@ -437,8 +437,9 @@ class BlackQueenBot:
         if user.id == self.bot_id:
             return
 
-        is_private = chat.type == ChatType.PRIVATE
+        is_private = (chat.type == ChatType.PRIVATE)
 
+        # যদি গ্রুপ হয়, তবে চেক করবে গ্রুপে রিপ্লাই দেওয়া উচিত কি না। ইনবক্স (private) হলে এই ফিল্টার বাইপাস হয়ে সরাসরি রিপ্লাই দেবে।
         if not is_private:
             await self.memory.register_active_group(chat.id, chat.title or "Group")
             if not self.should_reply_in_group(message, user.id, chat.id):
@@ -448,7 +449,8 @@ class BlackQueenBot:
         if now - self.last_user_replies.get(user.id, 0.0) < USER_COOLDOWN_SECONDS:
             return
         self.last_user_replies[user.id] = now
-        self.last_group_replies[chat.id] = now
+        if not is_private:
+            self.last_group_replies[chat.id] = now
 
         if chat.id not in self.active_sessions:
             self.active_sessions[chat.id] = {}
@@ -487,10 +489,8 @@ class BlackQueenBot:
 
     async def process_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
-        হিউম্যান-লাইক ভয়েস মেসেজ প্রসেসিং:
-        - ইউজারের ভয়েস ডিউরেশন (যেমন ১০ বা ২০ সেকেন্ড) মেপে সেই অনুপাতে ন্যাচরাল ওয়েটিং টাইম ও 'রেকর্ডিং ভয়েস' অ্যাকশন বজায় রাখবে।
-        - চ্যাটে কোনো 'তুমি বলেছ' বা অতিরিক্ত টেক্সট দেখাবে না (ক্লিন থাকবে)।
-        - হুবহু ইউজারের কথার ওপর ভিত্তি করে সঠিক উত্তর ভয়েস নোটে পাঠাবে।
+        হিউম্যান-লাইক ভয়েস মেসেজ প্রসেসিং (ইনবক্স ও গ্রুপ উভয় ক্ষেত্রের জন্য ১০০% ফিক্সড):
+        - ইনবক্স বা প্রাইভেট চ্যাটের ক্ষেত্রে সরাসরি ভয়েস প্রসেস করে উত্তর দেবে।
         """
         message = update.effective_message
         chat = update.effective_chat
@@ -502,7 +502,9 @@ class BlackQueenBot:
         if user.id == self.bot_id:
             return
 
-        is_private = chat.type == ChatType.PRIVATE
+        is_private = (chat.type == ChatType.PRIVATE)
+
+        # ইনবক্স হলে ফিল্টার ছাড়াই সরাসরি কাজ করবে, গ্রুপ হলে রেস্ট্রিকশন চেক করবে
         if not is_private:
             await self.memory.register_active_group(chat.id, chat.title or "Group")
             if not self.should_reply_in_group(message, user.id, chat.id):
@@ -513,9 +515,7 @@ class BlackQueenBot:
             self.active_sessions[chat.id] = {}
         self.active_sessions[chat.id][user.id] = now
 
-        # ইউজারের পাঠানো ভয়েসের ডিউরেশন (সেকেন্ড) বের করা (ডিফল্ট ৪ সেকেন্ড যদি না থাকে)
         voice_duration = message.voice.duration or 4
-        # রিয়েল মানুষের মতো শোনার ও ভাবার সময় ক্যালকুলেশন (যেমন ভয়েস বড় হলে একটু বেশি সময় ভাববে)
         thinking_delay = min(max(voice_duration * 0.6, 2.0), 12.0)
 
         try:
@@ -531,12 +531,9 @@ class BlackQueenBot:
             tg_file = await message.voice.get_file()
             await tg_file.download_to_drive(custom_path=temp_audio_path)
 
-            # ব্যাকগ্রাউন্ডে ভয়েস শোনার সময় ধরে রাখা যাতে হিউম্যান ফিল আসে
             start_time = time.time()
-
             transcription = await self.ai.transcribe_audio(temp_audio_path)
             
-            # যদি প্রসেসিং দ্রুত হয়ে যায়, তবে ন্যাচরাল ডিউরেশন অনুযায়ী বাকি সময়টুকু ওয়েট করবে
             elapsed = time.time() - start_time
             if elapsed < thinking_delay:
                 await asyncio.sleep(thinking_delay - elapsed)
@@ -553,7 +550,6 @@ class BlackQueenBot:
             await self.memory.add_message(chat.id, "user", f"{user_name} [ভয়েস]: {transcription}")
             await self.memory.add_message(chat.id, "assistant", bot_reply)
 
-            # উত্তর পাঠানোর আগে ফাইনাল ভয়েস ریکارڈিং অ্যাকশন
             try:
                 await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.RECORD_VOICE)
             except Exception:
