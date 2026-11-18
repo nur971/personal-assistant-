@@ -125,19 +125,19 @@ logging.basicConfig(
 logger = logging.getLogger("BlackQueenBot")
 
 # =============================================================================
-# ১০০% কার্যকরী এবং পার্মানেন্ট হেলথ চেক সার্ভার (HEAD, GET, POST সাপোর্ট সহ)
+# হেলথ চেক সার্ভার (UptimeRobot এর জন্য /, /health, /healthz সাপোর্ট সহ)
 # =============================================================================
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def handle_request(self, include_body=True):
         try:
-            response_body = b"<h1>Black Queen Bot is Alive and Running!</h1>"
+            body = b"Black Queen Bot is Alive and Running!"
             self.send_response(200)
-            self.send_header("Content-type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(response_body)))
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             if include_body and self.command != "HEAD":
-                self.wfile.write(response_body)
+                self.wfile.write(body)
         except Exception:
             pass
 
@@ -439,7 +439,7 @@ class BlackQueenBot:
 
         is_private = (chat.type == ChatType.PRIVATE)
 
-        # যদি গ্রুপ হয়, তবে চেক করবে গ্রুপে রিপ্লাই দেওয়া উচিত কি না। ইনবক্স (private) হলে এই ফিল্টার বাইপাস হয়ে সরাসরি রিপ্লাই দেবে।
+        # ইনবক্স হলে ফিল্টার বাইপাস হবে, গ্রুপ হলে গ্রুপ রেস্ট্রিকশন চেক করবে
         if not is_private:
             await self.memory.register_active_group(chat.id, chat.title or "Group")
             if not self.should_reply_in_group(message, user.id, chat.id):
@@ -456,10 +456,16 @@ class BlackQueenBot:
             self.active_sessions[chat.id] = {}
         self.active_sessions[chat.id][user.id] = now
 
+        # মেসেজ সিন বা টাইপিং স্ট্যাটাস দেখানো (রিয়েল হিউম্যান ফিল)
         try:
             await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
         except Exception:
             pass
+
+        # টেক্সটের লেন্থ অনুযায়ী পড়ার বা ভাবার ন্যাচরাল ডিলে
+        text_len = len(message.text)
+        thinking_delay = min(max(text_len * 0.02, 1.5), 5.0)
+        await asyncio.sleep(thinking_delay)
 
         history = await self.memory.get_history(chat.id)
         user_name = user.first_name or "বাবু"
@@ -481,6 +487,10 @@ class BlackQueenBot:
         )
 
         if send_as_voice:
+            try:
+                await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.RECORD_VOICE)
+            except Exception:
+                pass
             sent = await self._send_voice_reply(context, chat.id, message.message_id, bot_reply)
             if sent:
                 return
@@ -489,8 +499,9 @@ class BlackQueenBot:
 
     async def process_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
-        হিউম্যান-লাইক ভয়েস মেসেজ প্রসেসিং (ইনবক্স ও গ্রুপ উভয় ক্ষেত্রের জন্য ১০০% ফিক্সড):
-        - ইনবক্স বা প্রাইভেট চ্যাটের ক্ষেত্রে সরাসরি ভয়েস প্রসেস করে উত্তর দেবে।
+        হিউম্যান-লাইক ভয়েস মেসেজ প্রসেসিং:
+        - ভয়েস আসার সাথে সাথে 'Recording Voice' (সিন ও শোনার অবস্থা) দেখাবে।
+        - ভয়েসের দৈর্ঘ্য অনুযায়ী প্রসেসিং সময় নিয়ে নিখুঁত ভয়েস নোট পাঠাবে।
         """
         message = update.effective_message
         chat = update.effective_chat
@@ -504,7 +515,6 @@ class BlackQueenBot:
 
         is_private = (chat.type == ChatType.PRIVATE)
 
-        # ইনবক্স হলে ফিল্টার ছাড়াই সরাসরি কাজ করবে, গ্রুপ হলে রেস্ট্রিকশন চেক করবে
         if not is_private:
             await self.memory.register_active_group(chat.id, chat.title or "Group")
             if not self.should_reply_in_group(message, user.id, chat.id):
@@ -516,8 +526,10 @@ class BlackQueenBot:
         self.active_sessions[chat.id][user.id] = now
 
         voice_duration = message.voice.duration or 4
-        thinking_delay = min(max(voice_duration * 0.6, 2.0), 12.0)
+        # ভয়েস শোনার ও ভাবার জন্য রিয়েল হিউম্যান টাইম ক্যালকুলেশন
+        thinking_delay = min(max(voice_duration * 0.7, 2.5), 12.0)
 
+        # মেসেজ সিন করে শোনার সময় 'Recording voice' স্ট্যাটাস অন রাখা
         try:
             await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.RECORD_VOICE)
         except Exception:
@@ -550,6 +562,7 @@ class BlackQueenBot:
             await self.memory.add_message(chat.id, "user", f"{user_name} [ভয়েস]: {transcription}")
             await self.memory.add_message(chat.id, "assistant", bot_reply)
 
+            # ভয়েস ফাইল বানানোর সময় আবার রেকর্ডিং অ্যাকশন দেখানো
             try:
                 await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.RECORD_VOICE)
             except Exception:
